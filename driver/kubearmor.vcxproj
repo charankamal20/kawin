@@ -125,6 +125,7 @@
     <FilesToPackage Include="$(TargetPath)" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="Context.h" />
     <ClInclude Include="DeviceIOCTL.h" />
     <ClInclude Include="ETW.h" />
     <ClInclude Include="FastMutex.h" />
@@ -132,9 +133,11 @@
     <ClInclude Include="Globals.h" />
     <ClInclude Include="HashTable.h" />
     <ClInclude Include="KarmorLogs.h" />
+    <ClInclude Include="ProcessEvent.h" />
     <ClInclude Include="Rule.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="Context.cpp" />
     <ClCompile Include="FastMutex.cpp" />
     <ClCompile Include="Filter.cpp" />
     <ClCompile Include="Globals.cpp" />

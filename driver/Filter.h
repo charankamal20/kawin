@@ -1,17 +1,78 @@
 #pragma once
 #include "pch.h"
+#include "Context.h"
 
 #ifndef __FILTER_H__
 #define __FILTER_H__
 
-#pragma once
-
 EXTERN_C_START
-FLT_PREOP_CALLBACK_STATUS FLTAPI PreOperationCreate(
+
+// ==========================
+// ==== Filter Callbacks ====
+// ==========================
+
+// create
+FLT_PREOP_CALLBACK_STATUS FLTAPI PreCreateCallback(
     _Inout_ PFLT_CALLBACK_DATA Data,
     _In_ PCFLT_RELATED_OBJECTS FltObjects,
     _Flt_CompletionContext_Outptr_ PVOID* CompletionContext
 );
+
+FLT_POSTOP_CALLBACK_STATUS PostCreateCallback(
+    _Inout_ PFLT_CALLBACK_DATA data,
+    _In_ PCFLT_RELATED_OBJECTS fltObjects,
+    _In_ PVOID completionContext,
+    _In_ FLT_POST_OPERATION_FLAGS flags);
+
+// write
+FLT_PREOP_CALLBACK_STATUS PreWriteCallback(
+    _Inout_ PFLT_CALLBACK_DATA data,
+    _In_ PCFLT_RELATED_OBJECTS fltObjects,
+    _Flt_CompletionContext_Outptr_ PVOID* completionContext);
+
+FLT_POSTOP_CALLBACK_STATUS PostWriteCallback(
+    _Inout_ PFLT_CALLBACK_DATA data,
+    _In_ PCFLT_RELATED_OBJECTS fltObjects,
+    _In_ PVOID completionContext,
+    _In_ FLT_POST_OPERATION_FLAGS flags);
+
+// read
+FLT_PREOP_CALLBACK_STATUS PreReadCallback(
+    _Inout_ PFLT_CALLBACK_DATA data,
+    _In_ PCFLT_RELATED_OBJECTS fltObjects,
+    _Flt_CompletionContext_Outptr_ PVOID* completionContext);
+
+FLT_POSTOP_CALLBACK_STATUS PostReadCallback(
+    _Inout_ PFLT_CALLBACK_DATA data,
+    _In_ PCFLT_RELATED_OBJECTS fltObjects,
+    _In_ PVOID completionContext,
+    _In_ FLT_POST_OPERATION_FLAGS flags);
+
+// set information
+FLT_PREOP_CALLBACK_STATUS PreSetInformationCallback(
+    _Inout_ PFLT_CALLBACK_DATA data,
+    _In_ PCFLT_RELATED_OBJECTS fltObjects,
+    _Flt_CompletionContext_Outptr_ PVOID* completionContext);
+
+FLT_POSTOP_CALLBACK_STATUS PostSetInformationCallback(
+    _Inout_ PFLT_CALLBACK_DATA data,
+    _In_ PCFLT_RELATED_OBJECTS fltObjects,
+    _In_ PVOID completionContext,
+    _In_ FLT_POST_OPERATION_FLAGS flags);
+
+// cleanup
+FLT_PREOP_CALLBACK_STATUS PreCleanupCallback(
+    _Inout_ PFLT_CALLBACK_DATA data,
+    _In_ PCFLT_RELATED_OBJECTS fltObjects,
+    _Flt_CompletionContext_Outptr_ PVOID* completionContext);
+
+FLT_POSTOP_CALLBACK_STATUS PostCleanupCallback(
+    _Inout_ PFLT_CALLBACK_DATA data,
+    _In_ PCFLT_RELATED_OBJECTS fltObjects,
+    _In_ PVOID completionContext,
+    _In_ FLT_POST_OPERATION_FLAGS flags);
+
+// ==== // Filter Callbacks
 
 NTSTATUS FLTAPI InstanceFilterUnloadCallback(
     _In_ FLT_FILTER_UNLOAD_FLAGS Flags
@@ -28,6 +89,22 @@ NTSTATUS FLTAPI InstanceQueryTeardownCallback(
     _In_ PCFLT_RELATED_OBJECTS FltObjects,
     _In_ FLT_INSTANCE_QUERY_TEARDOWN_FLAGS Flags
 );
+
+VOID InstanceStartTeardownCallback(
+    _In_ PCFLT_RELATED_OBJECTS,
+    _In_ FLT_INSTANCE_TEARDOWN_FLAGS);
+
+VOID InstanceCompleteTeardownCallback(
+    _In_ PCFLT_RELATED_OBJECTS pFltObjects,
+    _In_ FLT_INSTANCE_TEARDOWN_FLAGS);
+
+VOID InstanceContextCleanup(
+    _In_ PFLT_CONTEXT pContext, 
+    _In_ FLT_CONTEXT_TYPE);
+
+VOID StreamHandleContextCleanup(
+    _In_ PFLT_CONTEXT pContext,
+    _In_ FLT_CONTEXT_TYPE contextType);
 
 NTSTATUS
 ScannerPortConnect(
@@ -60,11 +137,40 @@ CONST FLT_OPERATION_REGISTRATION g_callbacks[] =
     {
         IRP_MJ_CREATE,
         0,
-        PreOperationCreate,
-        0
+        PreCreateCallback,
+        PostCreateCallback
+    },
+    {
+        IRP_MJ_WRITE,
+        0,
+        PreWriteCallback,
+        PostWriteCallback
+    },
+    { 
+        IRP_MJ_SET_INFORMATION, 
+        FLTFL_OPERATION_REGISTRATION_SKIP_PAGING_IO, 
+        PreSetInformationCallback, 
+        PostSetInformationCallback 
+    },
+    {
+        IRP_MJ_CLEANUP,
+        0,
+        PreCleanupCallback,
+        PostCleanupCallback
     },
 
     { IRP_MJ_OPERATION_END }
+};
+
+const FLT_CONTEXT_REGISTRATION g_ContextCallbacks[] = {
+
+    { FLT_INSTANCE_CONTEXT, 0, InstanceContextCleanup,
+    sizeof(InstanceContext), c_CtxAllocTag },
+
+    { FLT_STREAMHANDLE_CONTEXT, 0, StreamHandleContextCleanup,
+    sizeof(StreamHandleContext), c_CtxAllocTag },
+
+    { FLT_CONTEXT_END }
 };
 
 CONST FLT_REGISTRATION g_filterRegistration =
@@ -72,13 +178,13 @@ CONST FLT_REGISTRATION g_filterRegistration =
     sizeof(FLT_REGISTRATION),      //  Size
     FLT_REGISTRATION_VERSION,      //  Version
     0,                             //  Flags
-    NULL,                          //  Context registration
+    g_ContextCallbacks,            //  Context registration
     g_callbacks,                   //  Operation callbacks
     InstanceFilterUnloadCallback,  //  FilterUnload
     InstanceSetupCallback,         //  InstanceSetup
     InstanceQueryTeardownCallback, //  InstanceQueryTeardown
-    NULL,                          //  InstanceTeardownStart
-    NULL,                          //  InstanceTeardownComplete
+    InstanceStartTeardownCallback,         //  InstanceTeardownStart
+    InstanceCompleteTeardownCallback,      //  InstanceTeardownComplete
     NULL,                          //  GenerateFileName
     NULL,                          //  GenerateDestinationFileName
     NULL                           //  NormalizeNameComponent
@@ -97,7 +203,7 @@ extern SCANNER_DATA g_ScannerData;
 
 #define MAX_FILTER_EVENT_SIZE (64 * 1024)
 
-#pragma pack(push, 8)
+#pragma pack(push, 1)
 typedef enum _FS_EVENT_TYPE
 {
     EventType_HostLog = 1,
@@ -149,11 +255,12 @@ typedef struct _EVENT {
     FS_EVENT_TYPE type;
     FS_EVENT_OPERATION operation;
     BOOLEAN blocked;
-    union {
+    FILE_EVENT data;
+    /*union {
         FILE_EVENT File;
         PROCESS_EVENT Process;
         NETWORK_EVENT Network;
-    } data;
+    } data;*/
 } EVENT, * PEVENT;
 
 typedef struct _REPLY {

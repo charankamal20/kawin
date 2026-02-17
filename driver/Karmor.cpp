@@ -2,6 +2,9 @@
 #include "ETW.h"
 #include "DeviceIOCTL.h"
 #include "Globals.h"
+#include "Buffer.h"
+#include "Protocol.h"
+#include "ProcessEvent.h"
 
 Globals g_State;
 SCANNER_DATA g_ScannerData;
@@ -302,7 +305,51 @@ NTSTATUS KarmorDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 
 
 void OnProcessNotify(PEPROCESS Process, HANDLE ProcessId, PPS_CREATE_NOTIFY_INFO CreateInfo) {
-    UNREFERENCED_PARAMETER(Process);
+    Buffer event;
+
+    if (!event.IsValid()) {
+        DbgPrint("unable to initialize buffer!!");
+        return;
+    }
+
+    protocol::EVENT_TYPE eType;
+
+    if (CreateInfo != nullptr) {
+        eType = EVENT_TYPE_PROCESS_CREATE;
+    }
+    else {
+        eType = EVENT_TYPE_PROCESS_TERMINATE;
+    }
+
+    NTSTATUS status = ProcessEventSerializer::SerializeProcessEvent(event, eType, Process, ProcessId, CreateInfo);
+    if (!NT_SUCCESS(status)) {
+        return;
+    }
+
+    DbgPrint("process event serialized!!");
+
+    LARGE_INTEGER timeOut = { 0 };
+    timeOut.QuadPart = 0;
+
+    DbgPrint("sending %lu bytes data to user-end", event.GetCurrentSize());
+
+    status = FltSendMessage(g_ScannerData.Filter,
+        &g_ScannerData.ClientPort,
+        (PVOID)event.GetBuffer(),
+        event.GetCurrentSize(),
+        NULL,
+        NULL,
+        &timeOut);
+
+    //DbgPrintHex(event.GetBuffer(), event.GetCurrentSize());
+    if (status == STATUS_SUCCESS) {
+        DbgPrint("!!! successfully process sent event to user-mode");
+    }
+    else {
+        DbgPrint("!!! couldn't send process event to user-mode, status 0x%X\n", status);
+
+    }
+    /*UNREFERENCED_PARAMETER(Process);
     if (CreateInfo) {
         KdPrint(("Process Create (%u)\n", HandleToUlong(ProcessId)));
         //
@@ -355,6 +402,6 @@ void OnProcessNotify(PEPROCESS Process, HANDLE ProcessId, PPS_CREATE_NOTIFY_INFO
     }
     else {
         KdPrint(("Process Exit (%u)\n", HandleToUlong(ProcessId)));
-    }
+    }*/
 }
 
