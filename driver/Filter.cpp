@@ -35,6 +35,45 @@ DbgPrintHex(
 // ==== Filter Callbacks ====
 // ==========================
 
+static BOOLEAN SkipReadWriteIo(_In_ PFLT_CALLBACK_DATA data)
+{
+    if (data->Iopb->IrpFlags & IRP_PAGING_IO)             return TRUE;
+    if (data->Iopb->IrpFlags & IRP_SYNCHRONOUS_PAGING_IO) return TRUE;
+    if (FLT_IS_FASTIO_OPERATION(data))                     return TRUE;
+    return FALSE;
+}
+
+static NTSTATUS SerializeAndSend(
+    _In_ protocol::EVENT_TYPE eType,
+    _In_ StreamHandleContext* pStrHandleCtx,
+    _In_ InstanceContext* pInstCtx)
+{
+    if (g_ScannerData.ClientPort == NULL || g_ScannerData.Filter == NULL)
+        return STATUS_PORT_DISCONNECTED;
+
+    Buffer event;
+    if (!event.IsValid())
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    NTSTATUS status = FileEventSerializer::SerializeFileEvent(
+        event, eType, pStrHandleCtx, pInstCtx);
+
+    if (!NT_SUCCESS(status))
+        return status;
+
+    LARGE_INTEGER timeOut = {};
+    timeOut.QuadPart = 0; // non-blocking
+
+    return FltSendMessage(
+        g_ScannerData.Filter,
+        &g_ScannerData.ClientPort,
+        (PVOID)event.GetBuffer(),
+        event.GetCurrentSize(),
+        NULL,
+        NULL,
+        &timeOut);
+}
+
 BOOLEAN SkipEvent(
     _In_ PFLT_CALLBACK_DATA Data,
     _In_ PCFLT_RELATED_OBJECTS FltObjects
@@ -66,209 +105,60 @@ BOOLEAN SkipEvent(
     return FALSE;
 }
 
-// create
+// ============================================================================
+//  IRP_MJ_CREATE
+// ============================================================================
 
-FLT_PREOP_CALLBACK_STATUS FLTAPI PreCreateCallback(
+FLT_PREOP_CALLBACK_STATUS PreCreateCallback(
     _Inout_ PFLT_CALLBACK_DATA Data,
     _In_ PCFLT_RELATED_OBJECTS FltObjects,
-    _Flt_CompletionContext_Outptr_ PVOID* CompletionContext
-)
+    _Flt_CompletionContext_Outptr_ PVOID* CompletionContext)
 {
     UNREFERENCED_PARAMETER(CompletionContext);
 
-    FLT_PREOP_CALLBACK_STATUS returnStatus = FLT_PREOP_SUCCESS_NO_CALLBACK;
-    PEVENT event = NULL;
-    ULONG eventLength = sizeof(EVENT);
-    PEVENT_REPLY eventReply = NULL;
-    ULONG replyLength;
-    LARGE_INTEGER timeOut = { 0 };
-    timeOut.QuadPart = -10 * 1000 * 1000; // 1 sec
-    PEPROCESS process = NULL;
-    PUNICODE_STRING imagePath = NULL;
-
-    //
-    // Pre-create callback to get file info during creation or opening
-    //
-
     if (!Data || !FltObjects)
-    {
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
-    }
 
-    if (KeGetCurrentIrql() > PASSIVE_LEVEL || 
-        IoGetTopLevelIrp() || 
+    if (KeGetCurrentIrql() > PASSIVE_LEVEL ||
+        IoGetTopLevelIrp() ||
         FLT_IS_FASTIO_OPERATION(Data) ||
-        !FLT_IS_IRP_OPERATION(Data) ) {
+        !FLT_IS_IRP_OPERATION(Data))
+    {
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
 
-    //
-    // Skip if this PreCreate call was performed from the System process.
-    //
     if (PsGetCurrentProcessId() == g_systemProcessId)
-    {
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
-    }
 
-    //
-    // Check if the FileObject being processed represents: Named pipe, Mailslot, or Volume. Skip this call if it returns true.
-    // 
     if (FltObjects->FileObject->Flags & (FO_NAMED_PIPE | FO_MAILSLOT | FO_VOLUME_OPEN))
-    {
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
-    }
 
-    __try {
-
-        replyLength = sizeof(EVENT_REPLY);
-
-        if (g_ScannerData.ClientPort != NULL && g_ScannerData.Filter != NULL) {
-
-            process = FltGetRequestorProcess(Data);
-
-            if (process == NULL) {
-                DbgPrint("!!! unable to get requestor process");
-            }
-            else {
-                const NTSTATUS status = SeLocateProcessImageName(process, &imagePath);
-                if (status == STATUS_SUCCESS) {
-                    if (imagePath != NULL) {
-                        //DbgPrint("requestor process image path: %wZ of length %d\n", imagePath, imagePath->Length);
-                        eventLength += imagePath->Length;
-                    }
-                }
-                else {
-                    DbgPrint("SeLocateProcessImageName failed 0x%x\n", status);
-                }
-            }
-
-            if (FltObjects->FileObject->FileName.Length > 0) {
-                eventLength += FltObjects->FileObject->FileName.Length;
-            }
-
-            //DbgPrint("event size %llu with process path %lu\n", sizeof(EVENT), eventLength);
-
-            if (eventLength > MAX_FILTER_EVENT_SIZE) {
-                returnStatus = FLT_PREOP_COMPLETE;
-                __leave;
-            }
-
-            event = (PEVENT)ExAllocatePoolZero(NonPagedPool,
-                eventLength,
-                'nacS');
-
-            eventReply = (PEVENT_REPLY)ExAllocatePoolZero(NonPagedPool,
-                sizeof(EVENT_REPLY),
-                'nacS');
-
-            if (event == NULL || eventReply == NULL) {
-                Data->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
-                Data->IoStatus.Information = 0;
-                returnStatus = FLT_PREOP_COMPLETE;
-                __leave;
-            }
-            ULONG currentOffset = sizeof(EVENT);
-            PUCHAR basePtr = (PUCHAR)event;
-
-            event->type = EventType_HostLog;
-            event->operation = EventOperation_File;
-            KeQuerySystemTime((LARGE_INTEGER*)&event->timestamp);
-            event->blocked = false;
-            event->data.ProcessId = (ULONG)(ULONG_PTR)PsGetCurrentProcessId();
-            event->data.Operation = 0;
-
-            if (imagePath != NULL) {
-                RtlCopyMemory(basePtr + currentOffset, imagePath->Buffer, imagePath->Length);
-                event->data.ProcessPathOffset = currentOffset;
-                event->data.ProcessPathLength = imagePath->Length;
-                currentOffset += imagePath->Length;
-            }
-            else {
-                event->data.ProcessPathOffset = 0;
-                event->data.ProcessPathLength = 0;
-                DbgPrint("!!! imagePath is NULL");
-            }
-
-            if (FltObjects->FileObject->FileName.Length > 0) {
-                RtlCopyMemory(basePtr + currentOffset, FltObjects->FileObject->FileName.Buffer, FltObjects->FileObject->FileName.Length);
-                event->data.FilePathLength = FltObjects->FileObject->FileName.Length;
-                event->data.FilePathOffset = currentOffset;
-                currentOffset += FltObjects->FileObject->FileName.Length;
-            }
-            else {
-                event->data.FilePathLength = 0;
-                event->data.FilePathOffset = 0;
-            }
-
-            returnStatus = FLT_PREOP_SUCCESS_WITH_CALLBACK;
-
-           /* NTSTATUS status = FltSendMessage(g_ScannerData.Filter,
-                &g_ScannerData.ClientPort,
-                event,
-                eventLength,
-                (PVOID)eventReply,
-                &replyLength,
-                &timeOut);
-
-            if (status == STATUS_SUCCESS) {
-                if (eventReply->ack) {
-                    DbgPrint("!!! successfully sent event to user-mode and ack");
-                }
-                else {
-                    DbgPrint("!!! successfully sent event to user-mode but not ack");
-                }
-            }
-            else {
-                DbgPrint("!!! couldn't send event to user-mode, status 0x%X\n", status);
-
-            }*/
-        }
-
-
-    }
-    __finally {
-
-        if (event != NULL) {
-            ExFreePoolWithTag(event, 'nacS');
-        }
-
-        if (eventReply != NULL) {
-            ExFreePoolWithTag(eventReply, 'nacS');
-        }
-
-        if (imagePath != NULL) {
-            ExFreePool(imagePath);
-        }
-    }
-
-    return returnStatus;
+    // Gate PostCreate.  No allocation here — the original bug was allocating
+    // an event in Pre and then freeing it before Post could use it.
+    return FLT_PREOP_SUCCESS_WITH_CALLBACK;
 }
 
 FLT_POSTOP_CALLBACK_STATUS PostCreateCallback(
     _Inout_ PFLT_CALLBACK_DATA data,
     _In_ PCFLT_RELATED_OBJECTS fltObjects,
     _In_ PVOID completionContext,
-    _In_ FLT_POST_OPERATION_FLAGS flags) {
-
+    _In_ FLT_POST_OPERATION_FLAGS flags)
+{
     UNREFERENCED_PARAMETER(completionContext);
-    UNREFERENCED_PARAMETER(fltObjects);
 
-    //DbgPrint("postcreate called!!!");
-
-    if (flags & FLTFL_POST_OPERATION_DRAINING) {
+    if (flags & FLTFL_POST_OPERATION_DRAINING)
         return FLT_POSTOP_FINISHED_PROCESSING;
-    }
 
-    if (!NT_SUCCESS(data->IoStatus.Status) || data->IoStatus.Status == STATUS_REPARSE) {
+    if (!NT_SUCCESS(data->IoStatus.Status) || data->IoStatus.Status == STATUS_REPARSE)
         return FLT_POSTOP_FINISHED_PROCESSING;
-    }
+
+    if (SkipEvent(data, fltObjects))
+        return FLT_POSTOP_FINISHED_PROCESSING;
 
     StreamHandleContext* pStrHandleCtx = nullptr;
+    InstanceContext* pInstCtx = nullptr;
 
     __try {
-        if (SkipEvent(data, fltObjects)) {
-            return FLT_POSTOP_FINISHED_PROCESSING;
-        }
         NTSTATUS status = FltAllocateContext(
             fltObjects->Filter,
             FLT_STREAMHANDLE_CONTEXT,
@@ -276,17 +166,13 @@ FLT_POSTOP_CALLBACK_STATUS PostCreateCallback(
             NonPagedPool,
             (PFLT_CONTEXT*)&pStrHandleCtx);
 
-        if (!NT_SUCCESS(status)) {
-            DbgPrint("FltAllocateContext failed !!!");
-            __leave;
-        }
-        
-        status = Context::InitializeStreamHandleContext(data, fltObjects, pStrHandleCtx);
+        if (!NT_SUCCESS(status)) __leave;
 
-        if (!NT_SUCCESS(status)) {
-            DbgPrint("InitializeStreamHandleContext failed !!!");
-            __leave;
-        }
+        // InitializeStreamHandleContext must capture:
+        //   fileIoStatus (FILE_CREATED / FILE_OPENED / FILE_OVERWRITTEN …)
+        //   readOnly, deleteOnClose, processId, imagePath, fileName
+        status = Context::InitializeStreamHandleContext(data, fltObjects, pStrHandleCtx);
+        if (!NT_SUCCESS(status)) __leave;
 
         status = FltSetStreamHandleContext(
             fltObjects->Instance,
@@ -295,24 +181,92 @@ FLT_POSTOP_CALLBACK_STATUS PostCreateCallback(
             pStrHandleCtx,
             nullptr);
 
-        if (!NT_SUCCESS(status)) {
-            DbgPrint("FltSetStreamHandleContext failed !!!");
-            __leave;
-        }
+        if (!NT_SUCCESS(status)) __leave;
 
-        DbgPrint("postCreate StreamHandleContext created !!!");
+        status = FltGetInstanceContext(fltObjects->Instance, (PFLT_CONTEXT*)&pInstCtx);
+        if (!NT_SUCCESS(status)) __leave;
+
+        // FIX: emit create event here (was missing entirely in original).
+        // Only emit for genuinely new files.  FILE_OPENED / FILE_OVERWRITTEN
+        // can be added as separate open events if required.
+        if (pStrHandleCtx->fileIoStatus == FILE_CREATED)
+        {
+            SerializeAndSend(protocol::EVENT_TYPE::EVENT_TYPE_FILE_CREATE,
+                pStrHandleCtx, pInstCtx);
+        }
     }
     __finally {
-        if (pStrHandleCtx) {
-            //PrintStreamHandleContext(pStrHandleCtx);
-            FltReleaseContext((PFLT_CONTEXT)pStrHandleCtx);
-        }
+        if (pStrHandleCtx) FltReleaseContext((PFLT_CONTEXT)pStrHandleCtx);
+        if (pInstCtx)      FltReleaseContext((PFLT_CONTEXT)pInstCtx);
     }
 
     return FLT_POSTOP_FINISHED_PROCESSING;
 }
 
-// write
+// ============================================================================
+//  IRP_MJ_READ
+// ============================================================================
+
+FLT_PREOP_CALLBACK_STATUS PreReadCallback(
+    _Inout_ PFLT_CALLBACK_DATA data,
+    _In_ PCFLT_RELATED_OBJECTS fltObjects,
+    _Flt_CompletionContext_Outptr_ PVOID* completionContext)
+{
+    UNREFERENCED_PARAMETER(completionContext);
+
+    if (SkipReadWriteIo(data))
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+
+    if (SkipEvent(data, fltObjects))
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+
+    // Only gate PostRead if a context exists for this file handle
+    StreamHandleContext* pStrHandleCtx = nullptr;
+    NTSTATUS status = FltGetStreamHandleContext(
+        fltObjects->Instance,
+        fltObjects->FileObject,
+        (PFLT_CONTEXT*)&pStrHandleCtx);
+
+    if (!NT_SUCCESS(status))
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+
+    FltReleaseContext(pStrHandleCtx);
+    return FLT_PREOP_SUCCESS_WITH_CALLBACK;
+}
+
+FLT_POSTOP_CALLBACK_STATUS PostReadCallback(
+    _Inout_ PFLT_CALLBACK_DATA data,
+    _In_ PCFLT_RELATED_OBJECTS fltObjects,
+    _In_ PVOID completionContext,
+    _In_ FLT_POST_OPERATION_FLAGS flags)
+{
+    UNREFERENCED_PARAMETER(completionContext);
+
+    if (SkipEvent(data, fltObjects) || flags & FLTFL_POST_OPERATION_DRAINING)
+        return FLT_POSTOP_FINISHED_PROCESSING;
+
+    // Only count reads that actually transferred data
+    if (!NT_SUCCESS(data->IoStatus.Status) || data->IoStatus.Information == 0)
+        return FLT_POSTOP_FINISHED_PROCESSING;
+
+    StreamHandleContext* pStrHandleCtx = nullptr;
+    NTSTATUS status = FltGetStreamHandleContext(
+        fltObjects->Instance,
+        fltObjects->FileObject,
+        (PFLT_CONTEXT*)&pStrHandleCtx);
+
+    if (NT_SUCCESS(status) && pStrHandleCtx)
+    {
+        pStrHandleCtx->wasRead = TRUE;
+        FltReleaseContext(pStrHandleCtx);
+    }
+
+    return FLT_POSTOP_FINISHED_PROCESSING;
+}
+
+// ============================================================================
+//  IRP_MJ_WRITE
+// ============================================================================
 
 FLT_PREOP_CALLBACK_STATUS PreWriteCallback(
     _Inout_ PFLT_CALLBACK_DATA data,
@@ -321,12 +275,12 @@ FLT_PREOP_CALLBACK_STATUS PreWriteCallback(
 {
     UNREFERENCED_PARAMETER(completionContext);
 
-    DbgPrint("prewrite called!!!");
-
-    if (SkipEvent(data, fltObjects)) {
-        DbgPrint("prewrite skip event!!!");
+    // FIX: also skip paging/fast-IO on the write path (was missing in original)
+    if (SkipReadWriteIo(data))
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
-    }
+
+    if (SkipEvent(data, fltObjects))
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
 
     StreamHandleContext* pStrHandleCtx = nullptr;
     NTSTATUS status = FltGetStreamHandleContext(
@@ -334,19 +288,18 @@ FLT_PREOP_CALLBACK_STATUS PreWriteCallback(
         fltObjects->FileObject,
         (PFLT_CONTEXT*)&pStrHandleCtx);
 
-    if (!NT_SUCCESS(status)) {
-        DbgPrint("prewrite FltGetStreamHandleContext failed!!!");
+    if (!NT_SUCCESS(status))
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
-    }
 
-    if (!pStrHandleCtx->readOnly || data->Iopb->Parameters.Write.Length == 0) {
-        DbgPrint("not readonly or requested 0 byte write");
+    if (!pStrHandleCtx->readOnly || data->Iopb->Parameters.Write.Length == 0)
+    {
         FltReleaseContext(pStrHandleCtx);
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
 
+    // FIX: release context before returning — original leaked it on this path
+    FltReleaseContext(pStrHandleCtx);
     return FLT_PREOP_SUCCESS_WITH_CALLBACK;
-
 }
 
 FLT_POSTOP_CALLBACK_STATUS PostWriteCallback(
@@ -354,14 +307,15 @@ FLT_POSTOP_CALLBACK_STATUS PostWriteCallback(
     _In_ PCFLT_RELATED_OBJECTS fltObjects,
     _In_ PVOID completionContext,
     _In_ FLT_POST_OPERATION_FLAGS flags)
-{ 
+{
     UNREFERENCED_PARAMETER(completionContext);
 
-    DbgPrint("postwrite called!!!");
-
-    if (SkipEvent(data, fltObjects) || flags & FLTFL_POST_OPERATION_DRAINING) {
+    if (SkipEvent(data, fltObjects) || flags & FLTFL_POST_OPERATION_DRAINING)
         return FLT_POSTOP_FINISHED_PROCESSING;
-    }
+
+    // Only mark changed if the write actually succeeded and transferred data
+    if (!NT_SUCCESS(data->IoStatus.Status) || data->IoStatus.Information == 0)
+        return FLT_POSTOP_FINISHED_PROCESSING;
 
     StreamHandleContext* pStrHandleCtx = nullptr;
     NTSTATUS status = FltGetStreamHandleContext(
@@ -369,18 +323,19 @@ FLT_POSTOP_CALLBACK_STATUS PostWriteCallback(
         fltObjects->FileObject,
         (PFLT_CONTEXT*)&pStrHandleCtx);
 
-    if (NT_SUCCESS(status) && pStrHandleCtx) {
-        pStrHandleCtx->wasChanged = TRUE;
-        DbgPrint("file changed!!!");
+    if (NT_SUCCESS(status) && pStrHandleCtx)
+    {
+        pStrHandleCtx->wasChanged = TRUE; // coalesced; event fires at cleanup
         FltReleaseContext(pStrHandleCtx);
     }
-
-    DbgPrint("file unchanged!!!");
 
     return FLT_POSTOP_FINISHED_PROCESSING;
 }
 
-// setfileinformation
+// ============================================================================
+//  IRP_MJ_SET_INFORMATION
+// ============================================================================
+
 FLT_PREOP_CALLBACK_STATUS PreSetInformationCallback(
     _Inout_ PFLT_CALLBACK_DATA data,
     _In_ PCFLT_RELATED_OBJECTS fltObjects,
@@ -388,23 +343,22 @@ FLT_PREOP_CALLBACK_STATUS PreSetInformationCallback(
 {
     UNREFERENCED_PARAMETER(completionContext);
 
-    if (SkipEvent(data, fltObjects)) {
+    if (SkipEvent(data, fltObjects))
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
-    }
 
-    FILE_INFORMATION_CLASS infoClass = data->Iopb->Parameters.SetFileInformation.FileInformationClass;
+    FILE_INFORMATION_CLASS infoClass =
+        data->Iopb->Parameters.SetFileInformation.FileInformationClass;
 
-    // if no delete or no rename skip
-    BOOLEAN isDelete = 
-        (infoClass == FileDispositionInformation || 
-        infoClass == FileDispositionInformationEx);
-    BOOLEAN isRename = 
-        (infoClass == FileRenameInformation || 
-        infoClass == FileRenameInformationEx);
+    BOOLEAN isDelete =
+        (infoClass == FileDispositionInformation ||
+            infoClass == FileDispositionInformationEx);
 
-    if (!isDelete && !isRename) {
+    BOOLEAN isRename =
+        (infoClass == FileRenameInformation ||
+            infoClass == FileRenameInformationEx);
+
+    if (!isDelete && !isRename)
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
-    }
 
     StreamHandleContext* pStrHandleCtx = nullptr;
     NTSTATUS status = FltGetStreamHandleContext(
@@ -412,12 +366,11 @@ FLT_PREOP_CALLBACK_STATUS PreSetInformationCallback(
         fltObjects->FileObject,
         (PFLT_CONTEXT*)&pStrHandleCtx);
 
-    if (NT_SUCCESS(status)) {
-        DbgPrint("preSetFileInfo file deleted or renamed!!!");
-        FltReleaseContext(pStrHandleCtx);
-        return FLT_PREOP_SUCCESS_WITH_CALLBACK;
-    }
-    return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    if (!NT_SUCCESS(status))
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+
+    FltReleaseContext(pStrHandleCtx);
+    return FLT_PREOP_SUCCESS_WITH_CALLBACK;
 }
 
 FLT_POSTOP_CALLBACK_STATUS PostSetInformationCallback(
@@ -428,99 +381,11 @@ FLT_POSTOP_CALLBACK_STATUS PostSetInformationCallback(
 {
     UNREFERENCED_PARAMETER(completionContext);
 
-    if (SkipEvent(data, fltObjects) || flags & FLTFL_POST_OPERATION_DRAINING) {
+    if (SkipEvent(data, fltObjects) || flags & FLTFL_POST_OPERATION_DRAINING)
         return FLT_POSTOP_FINISHED_PROCESSING;
-    }
 
     if (!NT_SUCCESS(data->IoStatus.Status))
-    {
         return FLT_POSTOP_FINISHED_PROCESSING;
-    }
-
-    StreamHandleContext* pStrHandleCtx = nullptr;
-
-    __try {
-        NTSTATUS status = FltGetStreamHandleContext(
-            fltObjects->Instance,
-            fltObjects->FileObject,
-            (PFLT_CONTEXT*)&pStrHandleCtx);
-        if (!NT_SUCCESS(status)) {
-            return FLT_POSTOP_FINISHED_PROCESSING;
-        }
-
-        FILE_INFORMATION_CLASS infoClass = data->Iopb->Parameters.SetFileInformation.FileInformationClass;
-        // if no delete or no rename skip
-        BOOLEAN isDelete =
-            (infoClass == FileDispositionInformation ||
-                infoClass == FileDispositionInformationEx);
-        BOOLEAN isRename =
-            (infoClass == FileRenameInformation ||
-                infoClass == FileRenameInformationEx);
-
-        if (!isDelete && !isRename) {
-            __leave;
-        }
-
-        pStrHandleCtx->dispositionDelete = isDelete;
-        DbgPrint("postSetFileInfo file deleted or renamed!!!");
-    }
-    __finally {
-        if (pStrHandleCtx) {
-            FltReleaseContext(pStrHandleCtx);
-        }
-    }
-
-    return FLT_POSTOP_FINISHED_PROCESSING;
-}
-
-// cleanup
-
-FLT_PREOP_CALLBACK_STATUS PreCleanupCallback(
-    _Inout_ PFLT_CALLBACK_DATA data,
-    _In_ PCFLT_RELATED_OBJECTS fltObjects,
-    _Flt_CompletionContext_Outptr_ PVOID* completionContext) {
-
-    UNREFERENCED_PARAMETER(completionContext);
-
-    if (SkipEvent(data, fltObjects)) {
-        return FLT_PREOP_SUCCESS_NO_CALLBACK;
-    }
-
-    DbgPrint("precleanup called!!");
-
-    StreamHandleContext* pStrHandleCtx = nullptr;
-    NTSTATUS status = FltGetStreamHandleContext(
-        fltObjects->Instance,
-        fltObjects->FileObject,
-        (PFLT_CONTEXT*)&pStrHandleCtx);
-
-    if (!NT_SUCCESS(status)) {
-        DbgPrint("precleanup no streamhandlecontext");
-        return FLT_PREOP_SUCCESS_NO_CALLBACK;
-    }
-
-    FltReleaseContext(pStrHandleCtx);
-    return FLT_PREOP_SYNCHRONIZE;
-}
-
-FLT_POSTOP_CALLBACK_STATUS PostCleanupCallback(
-    _Inout_ PFLT_CALLBACK_DATA data,
-    _In_ PCFLT_RELATED_OBJECTS fltObjects,
-    _In_ PVOID completionContext,
-    _In_ FLT_POST_OPERATION_FLAGS flags) {
-
-    UNREFERENCED_PARAMETER(completionContext);
-
-    DbgPrint("postcleanup called!!");
-
-    if (SkipEvent(data, fltObjects) || flags & FLTFL_POST_OPERATION_DRAINING) {
-        return FLT_POSTOP_FINISHED_PROCESSING;
-    }
-
-    if (!NT_SUCCESS(data->IoStatus.Status))
-    {
-        return FLT_POSTOP_FINISHED_PROCESSING;
-    }
 
     StreamHandleContext* pStrHandleCtx = nullptr;
     InstanceContext* pInstCtx = nullptr;
@@ -530,86 +395,321 @@ FLT_POSTOP_CALLBACK_STATUS PostCleanupCallback(
             fltObjects->Instance,
             fltObjects->FileObject,
             (PFLT_CONTEXT*)&pStrHandleCtx);
-        if (!NT_SUCCESS(status)) {
-            __leave;
+
+        if (!NT_SUCCESS(status)) __leave;
+
+        FILE_INFORMATION_CLASS infoClass =
+            data->Iopb->Parameters.SetFileInformation.FileInformationClass;
+
+        BOOLEAN isDelete =
+            (infoClass == FileDispositionInformation ||
+                infoClass == FileDispositionInformationEx);
+
+        BOOLEAN isRename =
+            (infoClass == FileRenameInformation ||
+                infoClass == FileRenameInformationEx);
+
+        if (!isDelete && !isRename) __leave;
+
+        if (isDelete)
+        {
+            // Flag it; the FILE_DELETE event fires at cleanup once we know
+            // the file is actually gone.
+            pStrHandleCtx->dispositionDelete = TRUE;
         }
 
-        status = FltGetInstanceContext(
-            fltObjects->Instance,
-            (PFLT_CONTEXT*)&pInstCtx);
+        if (isRename)
+        {
+            pStrHandleCtx->dispositionRename = TRUE;
 
-        if (!NT_SUCCESS(status)) {
-            __leave;
+            status = FltGetInstanceContext(fltObjects->Instance, (PFLT_CONTEXT*)&pInstCtx);
+            if (NT_SUCCESS(status))
+            {
+                SerializeAndSend(protocol::EVENT_TYPE::EVENT_TYPE_FILE_RENAME,
+                    pStrHandleCtx, pInstCtx);
+            }
         }
-
-        Buffer event;
-
-        if (!event.IsValid()) {
-            DbgPrint("unable to initialize buffer!!");
-            __leave;
-        }
-
-        protocol::EVENT_TYPE eType;
-
-        BOOLEAN deleted = pStrHandleCtx->deleteOnClose || pStrHandleCtx->dispositionDelete;
-
-        // delete event
-        if (deleted && pStrHandleCtx->fileIoStatus != FILE_CREATED) {
-            eType = protocol::EVENT_TYPE::EVENT_TYPE_FILE_DELETE;
-        }
-
-        // updation event
-        if (pStrHandleCtx->wasChanged && !deleted) {
-            eType = protocol::EVENT_TYPE::EVENT_TYPE_FILE_WRITE;
-        }
-
-        // close event
-        eType = protocol::EVENT_TYPE::EVENT_TYPE_FILE_CLOSE;
-
-        status = FileEventSerializer::SerializeFileEvent(event, eType, pStrHandleCtx, pInstCtx);
-        if (!NT_SUCCESS(status)) {
-            __leave;
-        }
-
-        DbgPrint("file event serialized!!");
-
-        LARGE_INTEGER timeOut = { 0 };
-        timeOut.QuadPart = 0;
-
-       /*status = FltSendMessage(g_ScannerData.Filter,
-            &g_ScannerData.ClientPort,
-            (PVOID)event.GetBuffer(),
-            event.GetCurrentSize(),
-            NULL,
-            NULL,
-            &timeOut);
-
-       DbgPrint("sending %lu bytes data to user-end", event.GetCurrentSize());
-       //DbgPrintHex(event.GetBuffer(), event.GetCurrentSize());
-        if (status == STATUS_SUCCESS) {
-            DbgPrint("!!! successfully sent event to user-mode");
-        }
-        else {
-            DbgPrint("!!! couldn't send event to user-mode, status 0x%X\n", status);
-
-        }*/
-
     }
     __finally {
-        if (pStrHandleCtx) {
-            FltReleaseContext(pStrHandleCtx);
-        }
-        if (pInstCtx) {
-            FltReleaseContext(pInstCtx);
-        }
+        if (pStrHandleCtx) FltReleaseContext(pStrHandleCtx);
+        if (pInstCtx)      FltReleaseContext(pInstCtx);
     }
 
     return FLT_POSTOP_FINISHED_PROCESSING;
-
-
 }
 
-// ==== // Filter Callbacks
+// ============================================================================
+//  IRP_MJ_CLEANUP
+// ============================================================================
+
+FLT_PREOP_CALLBACK_STATUS PreCleanupCallback(
+    _Inout_ PFLT_CALLBACK_DATA data,
+    _In_ PCFLT_RELATED_OBJECTS fltObjects,
+    _Flt_CompletionContext_Outptr_ PVOID* completionContext)
+{
+    UNREFERENCED_PARAMETER(completionContext);
+
+    if (SkipEvent(data, fltObjects))
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+
+    StreamHandleContext* pStrHandleCtx = nullptr;
+    NTSTATUS status = FltGetStreamHandleContext(
+        fltObjects->Instance,
+        fltObjects->FileObject,
+        (PFLT_CONTEXT*)&pStrHandleCtx);
+
+    if (!NT_SUCCESS(status))
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+
+    FltReleaseContext(pStrHandleCtx);
+    return FLT_PREOP_SYNCHRONIZE;
+}
+
+FLT_POSTOP_CALLBACK_STATUS PostCleanupCallback(
+    _Inout_ PFLT_CALLBACK_DATA data,
+    _In_ PCFLT_RELATED_OBJECTS fltObjects,
+    _In_ PVOID completionContext,
+    _In_ FLT_POST_OPERATION_FLAGS flags)
+{
+    UNREFERENCED_PARAMETER(completionContext);
+
+    if (SkipEvent(data, fltObjects) || flags & FLTFL_POST_OPERATION_DRAINING)
+        return FLT_POSTOP_FINISHED_PROCESSING;
+
+    if (!NT_SUCCESS(data->IoStatus.Status))
+        return FLT_POSTOP_FINISHED_PROCESSING;
+
+    StreamHandleContext* pStrHandleCtx = nullptr;
+    InstanceContext* pInstCtx = nullptr;
+
+    __try {
+        NTSTATUS status = FltGetStreamHandleContext(
+            fltObjects->Instance,
+            fltObjects->FileObject,
+            (PFLT_CONTEXT*)&pStrHandleCtx);
+
+        if (!NT_SUCCESS(status)) __leave;
+
+        status = FltGetInstanceContext(fltObjects->Instance, (PFLT_CONTEXT*)&pInstCtx);
+        if (!NT_SUCCESS(status)) __leave;
+
+        BOOLEAN deleted =
+            pStrHandleCtx->deleteOnClose || pStrHandleCtx->dispositionDelete;
+
+        // Read, file was read at least once during this handle's lifetime
+        if (pStrHandleCtx->wasRead)
+        {
+            SerializeAndSend(protocol::EVENT_TYPE::EVENT_TYPE_FILE_READ,
+                pStrHandleCtx, pInstCtx);
+        }
+
+        // Write, file was modified and is not being deleted
+        //    (if it is deleted the FILE_DELETE below covers the final outcome)
+        if (pStrHandleCtx->wasChanged && !deleted)
+        {
+            SerializeAndSend(protocol::EVENT_TYPE::EVENT_TYPE_FILE_WRITE,
+                pStrHandleCtx, pInstCtx);
+        }
+
+        // Delete
+        if (deleted && pStrHandleCtx->fileIoStatus != FILE_CREATED)
+        {
+            SerializeAndSend(protocol::EVENT_TYPE::EVENT_TYPE_FILE_DELETE,
+                pStrHandleCtx, pInstCtx);
+        }
+        else if (!deleted && !pStrHandleCtx->dispositionRename)
+        {
+            // Close, normal handle close with no other notable outcome
+            SerializeAndSend(protocol::EVENT_TYPE::EVENT_TYPE_FILE_CLOSE,
+                pStrHandleCtx, pInstCtx);
+        }
+    }
+    __finally {
+        if (pStrHandleCtx) FltReleaseContext(pStrHandleCtx);
+        if (pInstCtx)      FltReleaseContext(pInstCtx);
+    }
+
+    return FLT_POSTOP_FINISHED_PROCESSING;
+}
+
+//
+//// create
+//
+//FLT_PREOP_CALLBACK_STATUS FLTAPI PreCreateCallback(
+//    _Inout_ PFLT_CALLBACK_DATA Data,
+//    _In_ PCFLT_RELATED_OBJECTS FltObjects,
+//    _Flt_CompletionContext_Outptr_ PVOID* CompletionContext
+//)
+//{
+//    UNREFERENCED_PARAMETER(CompletionContext);
+//
+//    FLT_PREOP_CALLBACK_STATUS returnStatus = FLT_PREOP_SUCCESS_NO_CALLBACK;
+//    PEVENT event = NULL;
+//    ULONG eventLength = sizeof(EVENT);
+//    PEVENT_REPLY eventReply = NULL;
+//    ULONG replyLength;
+//    LARGE_INTEGER timeOut = { 0 };
+//    timeOut.QuadPart = -10 * 1000 * 1000; // 1 sec
+//    PEPROCESS process = NULL;
+//    PUNICODE_STRING imagePath = NULL;
+//
+//    //
+//    // Pre-create callback to get file info during creation or opening
+//    //
+//
+//    if (!Data || !FltObjects)
+//    {
+//        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+//    }
+//
+//    if (KeGetCurrentIrql() > PASSIVE_LEVEL || 
+//        IoGetTopLevelIrp() || 
+//        FLT_IS_FASTIO_OPERATION(Data) ||
+//        !FLT_IS_IRP_OPERATION(Data) ) {
+//        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+//    }
+//
+//    //
+//    // Skip if this PreCreate call was performed from the System process.
+//    //
+//    if (PsGetCurrentProcessId() == g_systemProcessId)
+//    {
+//        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+//    }
+//
+//    //
+//    // Check if the FileObject being processed represents: Named pipe, Mailslot, or Volume. Skip this call if it returns true.
+//    // 
+//    if (FltObjects->FileObject->Flags & (FO_NAMED_PIPE | FO_MAILSLOT | FO_VOLUME_OPEN))
+//    {
+//        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+//    }
+//
+//    __try {
+//
+//        replyLength = sizeof(EVENT_REPLY);
+//
+//        if (g_ScannerData.ClientPort != NULL && g_ScannerData.Filter != NULL) {
+//
+//            process = FltGetRequestorProcess(Data);
+//
+//            if (process == NULL) {
+//                //DbgPrint("!!! unable to get requestor process");
+//            }
+//            else {
+//                const NTSTATUS status = SeLocateProcessImageName(process, &imagePath);
+//                if (status == STATUS_SUCCESS) {
+//                    if (imagePath != NULL) {
+//                        //DbgPrint("requestor process image path: %wZ of length %d\n", imagePath, imagePath->Length);
+//                        eventLength += imagePath->Length;
+//                    }
+//                }
+//                else {
+//                    //DbgPrint("SeLocateProcessImageName failed 0x%x\n", status);
+//                }
+//            }
+//
+//            if (FltObjects->FileObject->FileName.Length > 0) {
+//                eventLength += FltObjects->FileObject->FileName.Length;
+//            }
+//
+//            //DbgPrint("event size %llu with process path %lu\n", sizeof(EVENT), eventLength);
+//
+//            if (eventLength > MAX_FILTER_EVENT_SIZE) {
+//                returnStatus = FLT_PREOP_COMPLETE;
+//                __leave;
+//            }
+//
+//            event = (PEVENT)ExAllocatePoolZero(NonPagedPool,
+//                eventLength,
+//                'nacS');
+//
+//            eventReply = (PEVENT_REPLY)ExAllocatePoolZero(NonPagedPool,
+//                sizeof(EVENT_REPLY),
+//                'nacS');
+//
+//            if (event == NULL || eventReply == NULL) {
+//                Data->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
+//                Data->IoStatus.Information = 0;
+//                returnStatus = FLT_PREOP_COMPLETE;
+//                __leave;
+//            }
+//            ULONG currentOffset = sizeof(EVENT);
+//            PUCHAR basePtr = (PUCHAR)event;
+//
+//            event->type = EventType_HostLog;
+//            event->operation = EventOperation_File;
+//            KeQuerySystemTime((LARGE_INTEGER*)&event->timestamp);
+//            event->blocked = false;
+//            event->data.ProcessId = (ULONG)(ULONG_PTR)PsGetCurrentProcessId();
+//            event->data.Operation = 0;
+//
+//            if (imagePath != NULL) {
+//                RtlCopyMemory(basePtr + currentOffset, imagePath->Buffer, imagePath->Length);
+//                event->data.ProcessPathOffset = currentOffset;
+//                event->data.ProcessPathLength = imagePath->Length;
+//                currentOffset += imagePath->Length;
+//            }
+//            else {
+//                event->data.ProcessPathOffset = 0;
+//                event->data.ProcessPathLength = 0;
+//                //DbgPrint("!!! imagePath is NULL");
+//            }
+//
+//            if (FltObjects->FileObject->FileName.Length > 0) {
+//                RtlCopyMemory(basePtr + currentOffset, FltObjects->FileObject->FileName.Buffer, FltObjects->FileObject->FileName.Length);
+//                event->data.FilePathLength = FltObjects->FileObject->FileName.Length;
+//                event->data.FilePathOffset = currentOffset;
+//                currentOffset += FltObjects->FileObject->FileName.Length;
+//            }
+//            else {
+//                event->data.FilePathLength = 0;
+//                event->data.FilePathOffset = 0;
+//            }
+//
+//            returnStatus = FLT_PREOP_SUCCESS_WITH_CALLBACK;
+//
+//           /* NTSTATUS status = FltSendMessage(g_ScannerData.Filter,
+//                &g_ScannerData.ClientPort,
+//                event,
+//                eventLength,
+//                (PVOID)eventReply,
+//                &replyLength,
+//                &timeOut);
+//
+//            if (status == STATUS_SUCCESS) {
+//                if (eventReply->ack) {
+//                    DbgPrint("!!! successfully sent event to user-mode and ack");
+//                }
+//                else {
+//                    DbgPrint("!!! successfully sent event to user-mode but not ack");
+//                }
+//            }
+//            else {
+//                DbgPrint("!!! couldn't send event to user-mode, status 0x%X\n", status);
+//
+//            }*/
+//        }
+//
+//
+//    }
+//    __finally {
+//
+//        if (event != NULL) {
+//            ExFreePoolWithTag(event, 'nacS');
+//        }
+//
+//        if (eventReply != NULL) {
+//            ExFreePoolWithTag(eventReply, 'nacS');
+//        }
+//            
+//        if (imagePath != NULL) {
+//            ExFreePool(imagePath);
+//        }
+//    }
+//
+//    return returnStatus;
+//}
 
 NTSTATUS
 ScannerPortConnect(
@@ -769,14 +869,14 @@ NTSTATUS InstanceSetupCallback(
             &pFltCtx);
 
         if (!NT_SUCCESS(status)) {
-            DbgPrint("InstanceSetupCallback:FltAllocateContext failed!! 0x%X\n", status);
+            //DbgPrint("InstanceSetupCallback:FltAllocateContext failed!! 0x%X\n", status);
             return status;
         }
         pCtx = (InstanceContext*)pFltCtx;
 
         status = Context::InitializeInstanceContext(fltObjects, pCtx);
         if (!NT_SUCCESS(status)) {
-            DbgPrint("InstanceSetupCallback:InitializeInstanceContext failed!!");
+            //DbgPrint("InstanceSetupCallback:InitializeInstanceContext failed!!");
             FltReleaseContext(pCtx);
             return status;
         }
@@ -789,7 +889,7 @@ NTSTATUS InstanceSetupCallback(
             pCtx,
             nullptr);
         if (!NT_SUCCESS(status)) {
-            DbgPrint("InstanceSetupCallback:FltSetInstanceContext failed!!");
+            //DbgPrint("InstanceSetupCallback:FltSetInstanceContext failed!!");
             FltReleaseContext(pCtx);
             return status;
         }

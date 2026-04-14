@@ -1,5 +1,4 @@
 #include "Context.h"
-#include <ntddk.h>
 #include <ntddstor.h>
 
 void PrintInstanceContext(InstanceContext* context) {
@@ -471,6 +470,20 @@ NTSTATUS Context::InitializeStreamHandleContext(
         context->filePath.Length = 0;
     }
 
+    
+    // Map process path UNICODE_STRING to embedded buffer
+    RtlInitEmptyUnicodeString(
+        &context->processPath,
+        context->processPathBuffer,
+        sizeof(context->processPathBuffer));
+
+    // Populate process path
+    status = PopulateProcessPath(data, context);
+    if (!NT_SUCCESS(status)) {
+        context->processPath.Length = 0;
+    }
+    
+
     // Extract handle information from IRP
     ACCESS_MASK desiredAccess = data->Iopb->Parameters.Create.SecurityContext->DesiredAccess;
     ULONG createOptions = data->Iopb->Parameters.Create.Options & 0x00FFFFFF;
@@ -570,6 +583,37 @@ NTSTATUS Context::PopulateFileInformation(
         }
     }
 
+    return status;
+}
+
+NTSTATUS Context::PopulateProcessPath(
+    PFLT_CALLBACK_DATA data,
+    StreamHandleContext* context
+) {
+    NTSTATUS status = STATUS_SUCCESS;
+    PEPROCESS process = FltGetRequestorProcess(data);
+
+    if (process == NULL) {
+        DbgPrint("!!! unable to get requestor process");
+    }
+    else {
+        PUNICODE_STRING imagePath = NULL;
+        status = SeLocateProcessImageName(process, &imagePath);
+        if (status == STATUS_SUCCESS) {
+            if (imagePath != NULL) {
+                RtlCopyMemory(context->processPath.Buffer, imagePath->Buffer, imagePath->Length);
+                context->processPath.Length = imagePath->Length;
+                context->processPath.MaximumLength = imagePath->Length + sizeof(WCHAR);
+
+                // Null terminate manually
+                context->processPath.Buffer[context->processPath.Length / sizeof(WCHAR)] = L'\0';
+                ExFreePool(imagePath);
+            }
+        }
+        else {
+            DbgPrint("SeLocateProcessImageName failed 0x%x\n", status);
+        }
+    }
     return status;
 }
 

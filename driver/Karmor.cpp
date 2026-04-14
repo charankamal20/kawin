@@ -26,6 +26,8 @@ void KarmorUnload(PDRIVER_OBJECT DriverObject) {
     if (DriverObject->DeviceObject)
         IoDeleteDevice(DriverObject->DeviceObject);
     CleanupETW();
+
+    ProcessCache::GetInstance().Cleanup();
     KdPrint(("karmor driver Unload called\n"));
 }
 

@@ -43,6 +43,7 @@ void PrintInstanceContext(InstanceContext* context);
 struct StreamHandleContext {
     // Process information
     HANDLE processId;
+    UNICODE_STRING processPath;
 
     UNICODE_STRING filePath;           // Normalized file path
     ULONG fileHash;                    // Hash of file path for quick lookup
@@ -58,7 +59,9 @@ struct StreamHandleContext {
     BOOLEAN isOpenedForExecution;      // FILE_EXECUTE access or SectionObjectPointers
     BOOLEAN deleteOnClose;             // FILE_DELETE_ON_CLOSE flag set
     BOOLEAN dispositionDelete;         // SetFileInformation(FileDispositionInfo) called
+    BOOLEAN dispositionRename;
     BOOLEAN wasChanged;                // At least one successful write operation
+    BOOLEAN wasRead;
 
     // Rule evaluation and enforcement
     BOOLEAN ruleEvaluated;             // Has rule engine been run?
@@ -67,6 +70,7 @@ struct StreamHandleContext {
     ULONG ruleVersion;                 // Rule version at evaluation time
     RuleAction cachedRuleAction;       // Cached result: Allow/Block/Audit
 
+    WCHAR processPathBuffer[512];
     WCHAR filePathBuffer[512];
 };
 
@@ -119,6 +123,11 @@ private:
         PFLT_CALLBACK_DATA data,
         PCFLT_RELATED_OBJECTS fltObjects,
         StreamHandleContext* context);
+
+    static NTSTATUS PopulateProcessPath(
+        PFLT_CALLBACK_DATA data,
+        StreamHandleContext* context
+    );
 
     static BOOLEAN IsExecutableFile(PUNICODE_STRING extension);
 

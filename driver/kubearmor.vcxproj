@@ -142,6 +142,7 @@
     <ClCompile Include="Filter.cpp" />
     <ClCompile Include="Globals.cpp" />
     <ClCompile Include="Karmor.cpp" />
+    <ClCompile Include="ProcessNode.cpp" />
     <ClCompile Include="Rule.cpp" />
   </ItemGroup>
   <ItemGroup>

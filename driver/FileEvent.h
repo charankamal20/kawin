@@ -5,6 +5,7 @@
 #include "EventHeader.h"
 #include "Protocol.h"
 #include "Context.h"
+#include "ProcessNode.h"
 
 class FileEventSerializer {
 public:
@@ -32,6 +33,17 @@ public:
 
         // write process id
         if (!serializer.WriteFieldULong(FIELD_PROCESS_ID, HandleToULong(ptrStrHandleCtx->processId))) {
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        // write process path
+        if (ptrStrHandleCtx->processPath.Length) {
+            DbgPrint("processPath has non zero length: %wZ\n", ptrStrHandleCtx->processPath);
+        }
+        else {
+            DbgPrint("processPath has zero length");
+        }
+        if (ptrStrHandleCtx->processPath.Length && !serializer.WriteFieldUnicodeString(FIELD_IMAGE_PATH, &ptrStrHandleCtx->processPath)) {
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 

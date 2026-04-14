@@ -141,6 +141,12 @@ CONST FLT_OPERATION_REGISTRATION g_callbacks[] =
         PostCreateCallback
     },
     {
+        IRP_MJ_READ,
+        0,
+        PreReadCallback,
+        PostReadCallback
+    },
+    {
         IRP_MJ_WRITE,
         0,
         PreWriteCallback,

@@ -1,6 +1,5 @@
 #pragma once
 
-//#include <ntddk.h>
 #define DEVICE_KARMOR 0x8022
 #define MAX_PATH_LENGTH 260
 

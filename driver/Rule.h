@@ -1,6 +1,6 @@
 #pragma once
-
-#include <ntddk.h>
+#include <fltKernel.h>
+#include <ntstrsafe.h>
 
 #define RULE_ENTRY_TAG 'rulE'
 #define RULE_PATH_TAG 'rulP'
