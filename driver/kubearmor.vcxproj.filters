@@ -48,6 +48,9 @@
     <ClCompile Include="ProcessNode.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="AsyncEventDispatcher.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="FastMutex.h">
@@ -78,6 +81,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="ProcessEvent.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="AsyncEventDispatcher.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

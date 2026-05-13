@@ -2,7 +2,6 @@
 
 #include "Buffer.h"
 #include "Serializer.h"
-#include "EventHeader.h"
 #include "Protocol.h"
 #include "Context.h"
 #include "ProcessNode.h"

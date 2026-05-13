@@ -2,7 +2,6 @@
 
 #include "Buffer.h"
 #include "Serializer.h"
-#include "EventHeader.h"
 #include "Protocol.h"
 #include "Context.h"
 #include "ProcessNode.h"
@@ -38,10 +37,10 @@ public:
 
         // write process path
         if (ptrStrHandleCtx->processPath.Length) {
-            DbgPrint("processPath has non zero length: %wZ\n", ptrStrHandleCtx->processPath);
+            //DbgPrint("processPath has non zero length: %wZ\n", ptrStrHandleCtx->processPath);
         }
         else {
-            DbgPrint("processPath has zero length");
+            //DbgPrint("processPath has zero length");
         }
         if (ptrStrHandleCtx->processPath.Length && !serializer.WriteFieldUnicodeString(FIELD_IMAGE_PATH, &ptrStrHandleCtx->processPath)) {
             return STATUS_INSUFFICIENT_RESOURCES;

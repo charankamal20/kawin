@@ -125,6 +125,7 @@
     <FilesToPackage Include="$(TargetPath)" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="AsyncEventDispatcher.h" />
     <ClInclude Include="Context.h" />
     <ClInclude Include="DeviceIOCTL.h" />
     <ClInclude Include="ETW.h" />
@@ -137,6 +138,7 @@
     <ClInclude Include="Rule.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="AsyncEventDispatcher.cpp" />
     <ClCompile Include="Context.cpp" />
     <ClCompile Include="FastMutex.cpp" />
     <ClCompile Include="Filter.cpp" />
