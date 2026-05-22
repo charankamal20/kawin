@@ -493,10 +493,13 @@ NTSTATUS Context::InitializeStreamHandleContext(
     case FILE_SUPERSEDED:
     case FILE_OVERWRITTEN:
         context->fileIoStatus = FILE_OVERWRITTEN;
+        break;
     case FILE_CREATED:
         context->fileIoStatus = FILE_CREATED;
+        break;
     default:
         context->fileIoStatus = FILE_OPENED;
+        break;
     }
 
     // Check if directory
@@ -690,4 +693,4 @@ ULONG Context::ComputeFilePathHash(PUNICODE_STRING filePath) {
     return hash;
 }
 
-// ============================= //
+// ============================= //

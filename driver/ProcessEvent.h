@@ -128,9 +128,11 @@ public:
                 }
 
                 if (!serializer.WriteFieldUnicodeString(FIELD_PARENT_PROCESS_IMAGE_PATH, &p_parentProcessCtx->imagePath)) {
+                    ProcessCache::GetInstance().ReleaseProcessContext(p_parentProcessCtx);
                     return STATUS_INSUFFICIENT_RESOURCES;
                 }
-                
+
+                ProcessCache::GetInstance().ReleaseProcessContext(p_parentProcessCtx);
             }
             else {
                 DbgPrint("parent process %lu was not cached", CreateInfo->ParentProcessId);
@@ -149,10 +151,12 @@ public:
                         return status;
                     }
 
-                    if (!serializer.WriteFieldUnicodeString(FIELD_PARENT_PROCESS_IMAGE_PATH, &p_creatorProcessCtx->imagePath)) {
+                    if (!serializer.WriteFieldUnicodeString(FIELD_CREATOR_PROCESS_IMAGE_PATH, &p_creatorProcessCtx->imagePath)) {
+                        ProcessCache::GetInstance().ReleaseProcessContext(p_creatorProcessCtx);
                         return STATUS_INSUFFICIENT_RESOURCES;
                     }
 
+                    ProcessCache::GetInstance().ReleaseProcessContext(p_creatorProcessCtx);
                 }
             }
             else {
@@ -231,22 +235,26 @@ public:
             ProcessCache::GetInstance().GetProcessContext(ProcessId, &p_ctx);
 
             if (!p_ctx) {
-                DbgPrint("process %lu delted and and has no cache", ProcessId);
+                DbgPrint("process %lu deleted and has no cache", ProcessId);
                 return STATUS_NOT_FOUND;
             }
 
             if (!serializer.WriteFieldULong(FIELD_PARENT_PROCESS_ID, HandleToULong(p_ctx->parentProcessId))) {
+                ProcessCache::GetInstance().ReleaseProcessContext(p_ctx);
                 return STATUS_INSUFFICIENT_RESOURCES;
             }
 
             if (!serializer.WriteFieldULong(FIELD_CREATOR_PROCESS_ID, HandleToULong(p_ctx->createrProcessId))) {
+                ProcessCache::GetInstance().ReleaseProcessContext(p_ctx);
                 return STATUS_INSUFFICIENT_RESOURCES;
             }
 
             if (!serializer.WriteFieldUnicodeString(FIELD_IMAGE_PATH, &p_ctx->imagePath)) {
+                ProcessCache::GetInstance().ReleaseProcessContext(p_ctx);
                 return STATUS_INSUFFICIENT_RESOURCES;
             }
 
+            ProcessCache::GetInstance().ReleaseProcessContext(p_ctx);
             ProcessCache::GetInstance().RemoveProcess(ProcessId);
         }
 

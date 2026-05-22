@@ -46,6 +46,43 @@ public:
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
+        // Enrich with process context from the cache (PPID, creator, etc.)
+        ProcessEntry* procEntry = nullptr;
+        NTSTATUS procStatus = ProcessCache::GetInstance().GetProcessContext(
+            ptrStrHandleCtx->processId, &procEntry);
+
+        if (NT_SUCCESS(procStatus) && procEntry)
+        {
+            // Write parent process ID
+            if (!serializer.WriteFieldULong(FIELD_PARENT_PROCESS_ID,
+                HandleToULong(procEntry->parentProcessId))) {
+                ProcessCache::GetInstance().ReleaseProcessContext(procEntry);
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+
+            // Write creator process ID (may differ from parent)
+            if (!serializer.WriteFieldULong(FIELD_CREATOR_PROCESS_ID,
+                HandleToULong(procEntry->createrProcessId))) {
+                ProcessCache::GetInstance().ReleaseProcessContext(procEntry);
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+
+            // Write parent process image path if available
+            ProcessEntry* parentEntry = nullptr;
+            NTSTATUS parentStatus = ProcessCache::GetInstance().GetProcessContext(
+                procEntry->parentProcessId, &parentEntry);
+            if (NT_SUCCESS(parentStatus) && parentEntry)
+            {
+                if (parentEntry->imagePath.Length > 0) {
+                    serializer.WriteFieldUnicodeString(FIELD_PARENT_PROCESS_IMAGE_PATH,
+                        &parentEntry->imagePath);
+                }
+                ProcessCache::GetInstance().ReleaseProcessContext(parentEntry);
+            }
+
+            ProcessCache::GetInstance().ReleaseProcessContext(procEntry);
+        }
+
         // write file path
         if (!serializer.WriteFieldUnicodeString(FIELD_FILE_PATH, &ptrStrHandleCtx->filePath)) {
             return STATUS_INSUFFICIENT_RESOURCES;
@@ -75,4 +112,4 @@ public:
 
         return STATUS_SUCCESS;
     }
-};
+};

@@ -89,6 +89,12 @@ public:
     // Lookup without adding reference (for quick checks)
     BOOLEAN IsProcessCached(_In_ HANDLE processId);
 
+    // Release a reference obtained via GetProcessContext
+    void ReleaseProcessContext(_In_ ProcessEntry* context) {
+        if (!context) return;
+        InterlockedDecrement(&context->referenceCount);
+    }
+
     // Get statistics
     void GetStatistics(
         _Out_ PLONGLONG total,
@@ -151,4 +157,4 @@ private:
 
         return nullptr;
     }
-};
+};

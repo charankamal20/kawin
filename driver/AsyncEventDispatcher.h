@@ -58,11 +58,12 @@ struct SlotHeader
     UINT16          reserved;     //  6
     volatile UINT32 payloadBytes; //  8
     UINT32          seqNum;       // 12
+    UINT32          strideBytes;  // 16 -- total slot size (header + aligned payload)
     // Written by the producer, read by the consumer to detect stuck slots.
-    UINT64          claimedTick;  // 16
-};                                // 24 bytes total
+    UINT64          claimedTick;  // 20
+};                                // 28 bytes -- padded to 32 by ASYNC_SLOT_ALIGN
 #pragma pack(pop)
-static_assert(sizeof(SlotHeader) == 24, "SlotHeader size changed");
+static_assert(sizeof(SlotHeader) == 28, "SlotHeader size changed");
 static_assert(FIELD_OFFSET(SlotHeader, state) == 0, "state must be at offset 0");
 
 // ---------------------------------------------------------------------------
@@ -165,7 +166,7 @@ private:
     KSPIN_LOCK      m_portLock{};
 
     PETHREAD        m_thread = nullptr;
-    KEVENT          m_dataReady{};   // NotificationEvent
+    KEVENT          m_dataReady{};   // SynchronizationEvent (auto-reset)
     KEVENT          m_stopEvent{};   // NotificationEvent
 
     volatile LONG   m_active = 0;
@@ -179,7 +180,7 @@ private:
 
     volatile LONG64 m_enqueued = 0;
     volatile LONG64 m_dropped = 0;
-    volatile LONG64 m_poisoned = 0;  // BUG B: slots skipped as stuck
+    volatile LONG64 m_poisoned = 0;  // slots skipped as stuck
 };
 
-extern AsyncEventDispatcher g_AsyncDispatcher;
+extern AsyncEventDispatcher g_AsyncDispatcher;
