@@ -48,7 +48,7 @@ public:
 
         // Enrich with process context from the cache (PPID, creator, etc.)
         ProcessEntry* procEntry = nullptr;
-        NTSTATUS procStatus = ProcessCache::GetInstance().GetProcessContext(
+        NTSTATUS procStatus = ProcessCache::GetInstance().GetOrPopulateProcessContext(
             ptrStrHandleCtx->processId, &procEntry);
 
         if (NT_SUCCESS(procStatus) && procEntry)
@@ -69,7 +69,7 @@ public:
 
             // Write parent process image path if available
             ProcessEntry* parentEntry = nullptr;
-            NTSTATUS parentStatus = ProcessCache::GetInstance().GetProcessContext(
+            NTSTATUS parentStatus = ProcessCache::GetInstance().GetOrPopulateProcessContext(
                 procEntry->parentProcessId, &parentEntry);
             if (NT_SUCCESS(parentStatus) && parentEntry)
             {

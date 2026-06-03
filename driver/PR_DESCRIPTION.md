@@ -118,6 +118,23 @@ References are properly acquired and released.
 
 ---
 
+### 11. ProcessCache: Lazy population for pre-existing processes (P0)
+
+**Files:** `ProcessNode.h`, `FileEvent.h`
+
+**Problem:** `ProcessCache` is only populated from `OnProcessNotify`, which fires for processes created *after* the driver registers with `PsSetCreateProcessNotifyRoutineEx`. Any process already running when the driver loads (explorer.exe, svchost.exe, cmd.exe, etc.) has no cache entry. When these processes perform file operations, `GetProcessContext` returns `STATUS_NOT_FOUND` and the entire enrichment block is silently skipped — resulting in file events with no PPID or parent context.
+
+**Fix:** Added `GetOrPopulateProcessContext()` method to `ProcessCache`. On cache miss, it:
+1. Calls `PsLookupProcessByProcessId` to get the `PEPROCESS`
+2. Opens a kernel handle and queries `PROCESS_BASIC_INFORMATION` via `ZwQueryInformationProcess` to get `InheritedFromUniqueProcessId` (the PPID)
+3. Calls `SeLocateProcessImageName` to get the image path
+4. Inserts the entry into the cache via `AddProcess`
+5. Returns the cached entry
+
+This is a one-time cost per process — subsequent file events from the same process hit the fast path. `FileEvent.h` now calls `GetOrPopulateProcessContext` instead of `GetProcessContext`.
+
+---
+
 ## Files Changed
 
 | File | Changes |
