@@ -330,6 +330,12 @@ void OnProcessNotify(PEPROCESS Process, HANDLE ProcessId, PPS_CREATE_NOTIFY_INFO
 
     DbgPrint("process event serialized!!");
 
+    // Guard: skip sending if no user-mode client is connected
+    if (g_ScannerData.ClientPort == nullptr) {
+        DbgPrint("!!! no user-mode client connected, skipping process event send");
+        return;
+    }
+
     LARGE_INTEGER timeOut = { 0 };
     timeOut.QuadPart = 0;
 

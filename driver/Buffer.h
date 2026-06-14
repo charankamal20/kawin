@@ -6,7 +6,7 @@
 // Pool tags
 #define BUFFER_POOL_TAG 'rBuF'
 
-const size_t DEFAULT_MAX_SIZE = 32768;
+const size_t DEFAULT_MAX_SIZE = 32768; // 32 KB default buffer size
 
 class Buffer {
 public:

@@ -38,7 +38,7 @@ AddService          = %ServiceName%,,MiniFilter.Service
 
 [DefaultUninstall.NT$ARCH$]
 LegacyUninstall = 1
-DelFiles   = MiniFilter.DriverFiles
+DelFiles   = MiniFilter.DelDriverFiles
 
 [DefaultUninstall.NT$ARCH$.Services]
 DelService = %ServiceName%,0x200
@@ -74,6 +74,9 @@ HKR,"Instances\"%Instance1.Name%,"Flags",0x00010001,%Instance1.Flags%
 ;
 
 [MiniFilter.DriverFiles]
+kubearmor.sys
+
+[MiniFilter.DelDriverFiles]
 kubearmor.sys
 
 [Strings]

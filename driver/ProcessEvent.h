@@ -5,6 +5,7 @@
 #include "Protocol.h"
 #include "Context.h"
 #include "ProcessNode.h"
+#include "EventStructs.h"
 
 struct ProcessContext {
 
@@ -42,7 +43,6 @@ struct ProcessContext {
 
 class ProcessEventSerializer {
 public:
-    // Serialize process create event
     static NTSTATUS SerializeProcessEvent(
         _Inout_ Buffer& buffer,
         _In_ protocol::EVENT_TYPE eventType,
@@ -50,46 +50,32 @@ public:
         _In_ HANDLE ProcessId,
         _In_ PPS_CREATE_NOTIFY_INFO CreateInfo)
     {
-        Serializer serializer(buffer);
+        UNREFERENCED_PARAMETER(eventType);
+        UNREFERENCED_PARAMETER(Process);
+        
+        if (!buffer.IsValid()) {
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
 
         LARGE_INTEGER timestamp;
         KeQuerySystemTime(&timestamp);
 
-        // write event type
-        if (!serializer.WriteFieldULong(FIELD_EVENT_TYPE, static_cast<ULONG>(eventType))) {
-            return STATUS_INSUFFICIENT_RESOURCES;
+        EVENT ev = { 0 };
+        ev.timestamp = timestamp.QuadPart;
+        ev.type = EventType_HostLog;
+        ev.operation = EventOperation_Process;
+        ev.blocked = FALSE;
+
+        PROCESS_EVENT pe = { 0 };
+        pe.operation = (CreateInfo != nullptr) ? 0 /*P_CREATE*/ : 1 /*P_TERMINATE*/;
+        pe.process_id = HandleToULong(ProcessId);
+        
+        if (!buffer.WriteBytes(&ev, sizeof(EVENT))) {
+            return STATUS_BUFFER_TOO_SMALL;
         }
 
-        // write timestamp
-        if (!serializer.WriteFieldULongLong(FIELD_TIMESTAMP, timestamp.QuadPart)) {
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
-
-        // write process id
-        if (!serializer.WriteFieldULong(FIELD_PROCESS_ID, HandleToULong(ProcessId))) {
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
-
-        if (CreateInfo) { // process create event
-            // write parent process id
-            if (!serializer.WriteFieldULong(FIELD_PARENT_PROCESS_ID, HandleToULong(CreateInfo->ParentProcessId))) {
-                return STATUS_INSUFFICIENT_RESOURCES;
-            }
-
-            // write creater process id
-            if (!serializer.WriteFieldULong(FIELD_CREATOR_PROCESS_ID, HandleToULong(CreateInfo->CreatingThreadId.UniqueProcess))) {
-                return STATUS_INSUFFICIENT_RESOURCES;
-            }
-
-            // write process image file
-            if (CreateInfo->FileOpenNameAvailable && CreateInfo->ImageFileName) {
-                if (!serializer.WriteFieldUnicodeString(FIELD_IMAGE_PATH, CreateInfo->ImageFileName)) {
-                    return STATUS_INSUFFICIENT_RESOURCES;
-                }
-            }
-            else {
-                DbgPrint("process %lu has no imageName", HandleToULong(ProcessId));
-            }
+        if (CreateInfo) {
+            pe.parent_process_id = HandleToULong(CreateInfo->ParentProcessId);
 
             NTSTATUS status = ProcessCache::GetInstance().AddProcess(
                 ProcessId,
@@ -97,165 +83,58 @@ public:
                 CreateInfo->CreatingThreadId.UniqueProcess,
                 CreateInfo->ImageFileName
             );
+            UNREFERENCED_PARAMETER(status);
 
-            if (!NT_SUCCESS(status))
-                return status;
+            if (CreateInfo->FileOpenNameAvailable && CreateInfo->ImageFileName &&
+                CreateInfo->ImageFileName->Buffer != nullptr && CreateInfo->ImageFileName->Length > 0) {
+                pe.process_path_offset = buffer.GetCurrentSize();
+                pe.process_path_length = CreateInfo->ImageFileName->Length;
+                buffer.WriteBytes(CreateInfo->ImageFileName->Buffer, CreateInfo->ImageFileName->Length);
+            }
 
-            LONGLONG total, active, hit, miss;
-            ProcessCache::GetInstance().GetStatistics(&total, &active, &hit, &miss);
-
-            DbgPrintEx(DPFLTR_IHVDRIVER_ID,
-                DPFLTR_INFO_LEVEL,
-                "statisctics::total: %I64d active : %I64d hit : %I64d miss : %I64d", total, active, hit, miss);
-
-            // write command line
-            if (CreateInfo->CommandLine) {
-                if (!serializer.WriteFieldUnicodeString(FIELD_COMMAND_LINE, CreateInfo->CommandLine)) {
-                    return STATUS_INSUFFICIENT_RESOURCES;
-                }
+            if (CreateInfo->CommandLine &&
+                CreateInfo->CommandLine->Buffer != nullptr && CreateInfo->CommandLine->Length > 0) {
+                pe.command_line_offset = buffer.GetCurrentSize();
+                pe.command_line_length = CreateInfo->CommandLine->Length;
+                buffer.WriteBytes(CreateInfo->CommandLine->Buffer, CreateInfo->CommandLine->Length);
             }
 
             if (ProcessCache::GetInstance().IsProcessCached(CreateInfo->ParentProcessId)) {
                 ProcessEntry* p_parentProcessCtx = nullptr;
-                status = ProcessCache::GetInstance().GetProcessContext(
+                NTSTATUS parentStatus = ProcessCache::GetInstance().GetProcessContext(
                     CreateInfo->ParentProcessId,
                     &p_parentProcessCtx
                 );
-
-                if (!NT_SUCCESS(status)) {
-                    DbgPrint("parent process %lu context failed", CreateInfo->ParentProcessId);
-                    return status;
-                }
-
-                if (!serializer.WriteFieldUnicodeString(FIELD_PARENT_PROCESS_IMAGE_PATH, &p_parentProcessCtx->imagePath)) {
+                if (NT_SUCCESS(parentStatus) && p_parentProcessCtx != nullptr) {
+                    if (p_parentProcessCtx->imagePath.Buffer != nullptr &&
+                        p_parentProcessCtx->imagePath.Length > 0) {
+                        pe.parent_process_path_offset = buffer.GetCurrentSize();
+                        pe.parent_process_path_length = p_parentProcessCtx->imagePath.Length;
+                        buffer.WriteBytes(p_parentProcessCtx->imagePath.Buffer, p_parentProcessCtx->imagePath.Length);
+                    }
                     ProcessCache::GetInstance().ReleaseProcessContext(p_parentProcessCtx);
-                    return STATUS_INSUFFICIENT_RESOURCES;
-                }
-
-                ProcessCache::GetInstance().ReleaseProcessContext(p_parentProcessCtx);
-            }
-            else {
-                DbgPrint("parent process %lu was not cached", CreateInfo->ParentProcessId);
-            }
-
-            if (CreateInfo->ParentProcessId != CreateInfo->CreatingThreadId.UniqueProcess){
-                if (ProcessCache::GetInstance().IsProcessCached(CreateInfo->CreatingThreadId.UniqueProcess)) {
-                    ProcessEntry* p_creatorProcessCtx = nullptr;
-                    status = ProcessCache::GetInstance().GetProcessContext(
-                        CreateInfo->CreatingThreadId.UniqueProcess,
-                        &p_creatorProcessCtx
-                    );
-
-                    if (!NT_SUCCESS(status)) {
-                        DbgPrint("creator process %lu context failed", CreateInfo->CreatingThreadId.UniqueProcess);
-                        return status;
-                    }
-
-                    if (!serializer.WriteFieldUnicodeString(FIELD_CREATOR_PROCESS_IMAGE_PATH, &p_creatorProcessCtx->imagePath)) {
-                        ProcessCache::GetInstance().ReleaseProcessContext(p_creatorProcessCtx);
-                        return STATUS_INSUFFICIENT_RESOURCES;
-                    }
-
-                    ProcessCache::GetInstance().ReleaseProcessContext(p_creatorProcessCtx);
                 }
             }
-            else {
-                DbgPrint("creator process %lu was not cached", CreateInfo->CreatingThreadId.UniqueProcess);
-            }
-
-            // get process token info
-            PACCESS_TOKEN token = PsReferencePrimaryToken(Process);
-            if (token)
-            {
-                UNICODE_STRING sidString = {};
-                PTOKEN_USER tokenUser = nullptr;
-                status = SeQueryInformationToken(token, TokenUser,
-                    reinterpret_cast<PVOID*>(&tokenUser));
-                if (NT_SUCCESS(status) && tokenUser)
-                {
-                    status = RtlConvertSidToUnicodeString(&sidString,
-                        tokenUser->User.Sid,
-                        TRUE /*allocate*/);
-                    if (NT_SUCCESS(status))
-                    {
-                        if (!serializer.WriteFieldUnicodeString(FIELD_PROCESS_USER_SID, &sidString)) {
-                            RtlFreeUnicodeString(&sidString);
-                            ExFreePool(tokenUser);
-                            PsDereferencePrimaryToken(token);
-                            return STATUS_INSUFFICIENT_RESOURCES;
-                        }
-                        // Free the buffer allocated by RtlConvertSidToUnicodeString.
-                        RtlFreeUnicodeString(&sidString);
-                    }
-                    ExFreePool(tokenUser);
-                }
-                else {
-                    DbgPrint("failed to get process token user info");
-                }
- 
-                TOKEN_ELEVATION* elevation = nullptr;
-                NTSTATUS elevStatus = SeQueryInformationToken(token, TokenElevation,
-                    reinterpret_cast<PVOID*>(&elevation));
-                if (NT_SUCCESS(elevStatus) && elevation) {
-                    DbgPrint("[TokenInfo] isElevated: %lu\n", elevation->TokenIsElevated);
-                    if (!serializer.WriteFieldBoolean(FIELD_PROCESS_TOKEN_ELEVATION,
-                        (elevation->TokenIsElevated != 0))) {
-                        PsDereferencePrimaryToken(token);
-                        return STATUS_INSUFFICIENT_RESOURCES;
-                    }
-                }
-
-                TOKEN_ELEVATION_TYPE* elevationType = nullptr;
-                NTSTATUS elevTypeStatus = SeQueryInformationToken(token, TokenElevationType,
-                    reinterpret_cast<PVOID*>(&elevationType));
-                if (NT_SUCCESS(elevTypeStatus) && elevationType) {
-                    DbgPrint("[TokenInfo] elevationType: %lu\n",
-                        static_cast<ULONG>(*elevationType));
-                    if (!serializer.WriteFieldULong(FIELD_PROCESS_TOKEN_ELEVATION_TYPE,
-                        static_cast<ULONG>(*elevationType))) {
-                        PsDereferencePrimaryToken(token);
-                        return STATUS_INSUFFICIENT_RESOURCES;
-                    }
-                }
-                else {
-                    DbgPrint("failed to get elevation type info");
-                }
-                PsDereferencePrimaryToken(token);
-            }
-            else {
-                DbgPrint("failed to get process token info");
-            }
-        }
-        else { // process delete event
-            if (!serializer.WriteFieldULong(FIELD_EXIT_CODE, (ULONG)PsGetProcessExitStatus(Process))) {
-                return STATUS_INSUFFICIENT_RESOURCES;
-            }
-
+        } else {
             ProcessEntry* p_ctx = nullptr;
             ProcessCache::GetInstance().GetProcessContext(ProcessId, &p_ctx);
-
-            if (!p_ctx) {
-                DbgPrint("process %lu deleted and has no cache", ProcessId);
-                return STATUS_NOT_FOUND;
-            }
-
-            if (!serializer.WriteFieldULong(FIELD_PARENT_PROCESS_ID, HandleToULong(p_ctx->parentProcessId))) {
+            if (p_ctx != nullptr) {
+                pe.parent_process_id = HandleToULong(p_ctx->parentProcessId);
+                if (p_ctx->imagePath.Buffer != nullptr && p_ctx->imagePath.Length > 0) {
+                    pe.process_path_offset = buffer.GetCurrentSize();
+                    pe.process_path_length = p_ctx->imagePath.Length;
+                    buffer.WriteBytes(p_ctx->imagePath.Buffer, p_ctx->imagePath.Length);
+                }
                 ProcessCache::GetInstance().ReleaseProcessContext(p_ctx);
-                return STATUS_INSUFFICIENT_RESOURCES;
+                ProcessCache::GetInstance().RemoveProcess(ProcessId);
             }
+        }
 
-            if (!serializer.WriteFieldULong(FIELD_CREATOR_PROCESS_ID, HandleToULong(p_ctx->createrProcessId))) {
-                ProcessCache::GetInstance().ReleaseProcessContext(p_ctx);
-                return STATUS_INSUFFICIENT_RESOURCES;
-            }
+        ev.data.Process = pe;
 
-            if (!serializer.WriteFieldUnicodeString(FIELD_IMAGE_PATH, &p_ctx->imagePath)) {
-                ProcessCache::GetInstance().ReleaseProcessContext(p_ctx);
-                return STATUS_INSUFFICIENT_RESOURCES;
-            }
-
-            ProcessCache::GetInstance().ReleaseProcessContext(p_ctx);
-            ProcessCache::GetInstance().RemoveProcess(ProcessId);
+        // Guard: only write back the header if the buffer is still valid
+        if (buffer.GetBuffer() != nullptr && !buffer.HasOverflow()) {
+            RtlCopyMemory(buffer.GetBuffer(), &ev, sizeof(EVENT));
         }
 
         if (buffer.HasOverflow()) {

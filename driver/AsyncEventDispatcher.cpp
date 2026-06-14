@@ -385,6 +385,7 @@ NTSTATUS AsyncEventDispatcher::SendOne(UINT32 bytes)
     return status;
 }
 
+_Use_decl_annotations_
 VOID AsyncEventDispatcher::WorkerEntry(PVOID ctx)
 {
     static_cast<AsyncEventDispatcher*>(ctx)->WorkerLoop();
@@ -456,4 +457,4 @@ void AsyncEventDispatcher::WorkerLoop()
     }
 
     KdPrint(("[AsyncDisp] worker exiting\n"));
-}
+}

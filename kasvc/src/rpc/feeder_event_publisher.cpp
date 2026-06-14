@@ -202,16 +202,42 @@ namespace kubearmor::rpc {
             alert.set_parentprocessname("");
             alert.set_resource(fe->file_path);
             alert.set_source(fe->process_path);
+            
+            std::string opStr;
+            switch(fe->operation) {
+                case data::FileOperation::F_CREATE: opStr = "Create"; break;
+                case data::FileOperation::F_READ: opStr = "Read"; break;
+                case data::FileOperation::F_WRITE: opStr = "Write"; break;
+                case data::FileOperation::F_DELETE: opStr = "Delete"; break;
+                case data::FileOperation::F_RENAME: opStr = "Rename"; break;
+                case data::FileOperation::F_SETINFO: opStr = "SetInfo"; break;
+                case data::FileOperation::F_CLEANUP: opStr = "Cleanup"; break;
+                case data::FileOperation::F_CLOSE: opStr = "Close"; break;
+                default: opStr = "Unknown";
+            }
+            alert.set_data("Event=" + opStr);
         }
         else if (event.IsProcessEvent()) {
             auto pe = event.GetProcessData();
             alert.set_operation("Process");
             alert.set_hostpid(pe->process_id);
             alert.set_pid(pe->process_id);
+            alert.set_ppid(pe->parent_process_id);
+            alert.set_hostppid(pe->parent_process_id);
             alert.set_processname(pe->process_path);
             alert.set_parentprocessname(pe->parent_process_path);
             alert.set_resource(pe->process_path);
             alert.set_source(pe->command_line);
+
+            std::string opStr;
+            switch(pe->operation) {
+                case data::ProcessOperation::P_CREATE: opStr = "Create"; break;
+                case data::ProcessOperation::P_TERMINATE: opStr = "Terminate"; break;
+                case data::ProcessOperation::P_OPEN_HANDLE: opStr = "OpenHandle"; break;
+                case data::ProcessOperation::P_DUPLICATE_HANDLE: opStr = "DuplicateHandle"; break;
+                default: opStr = "Unknown";
+            }
+            alert.set_data("Event=" + opStr);
         }
         else if (event.IsNetworkEvent()) {
             alert.set_operation("Network");
@@ -255,16 +281,42 @@ namespace kubearmor::rpc {
             log.set_parentprocessname("");
             log.set_resource(fe->file_path);
             log.set_source(fe->process_path);
+            
+            std::string opStr;
+            switch(fe->operation) {
+                case data::FileOperation::F_CREATE: opStr = "Create"; break;
+                case data::FileOperation::F_READ: opStr = "Read"; break;
+                case data::FileOperation::F_WRITE: opStr = "Write"; break;
+                case data::FileOperation::F_DELETE: opStr = "Delete"; break;
+                case data::FileOperation::F_RENAME: opStr = "Rename"; break;
+                case data::FileOperation::F_SETINFO: opStr = "SetInfo"; break;
+                case data::FileOperation::F_CLEANUP: opStr = "Cleanup"; break;
+                case data::FileOperation::F_CLOSE: opStr = "Close"; break;
+                default: opStr = "Unknown";
+            }
+            log.set_data("Event=" + opStr);
         }
         else if (event.IsProcessEvent()) {
             auto pe = event.GetProcessData();
             log.set_operation("Process");
             log.set_hostpid(pe->process_id);
             log.set_pid(pe->process_id);
+            log.set_ppid(pe->parent_process_id);
+            log.set_hostppid(pe->parent_process_id);
             log.set_processname(pe->process_path);
             log.set_parentprocessname(pe->parent_process_path);
             log.set_resource(pe->process_path);
             log.set_source(pe->command_line);
+
+            std::string opStr;
+            switch(pe->operation) {
+                case data::ProcessOperation::P_CREATE: opStr = "Create"; break;
+                case data::ProcessOperation::P_TERMINATE: opStr = "Terminate"; break;
+                case data::ProcessOperation::P_OPEN_HANDLE: opStr = "OpenHandle"; break;
+                case data::ProcessOperation::P_DUPLICATE_HANDLE: opStr = "DuplicateHandle"; break;
+                default: opStr = "Unknown";
+            }
+            log.set_data("Event=" + opStr);
         }
         else if (event.IsNetworkEvent()) {
             log.set_operation("Network");

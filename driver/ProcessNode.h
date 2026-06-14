@@ -1,6 +1,14 @@
 #pragma once
 #include "FastMutex.h"
 
+#ifndef _NTPSAPI_H
+#ifndef PROCESS_QUERY_LIMITED_INFORMATION
+
+#define PROCESS_QUERY_LIMITED_INFORMATION 0x1000
+
+#endif
+#endif
+
 // ZwQueryInformationProcess is not always declared in the WDK
 // headers when compiling C++. Provide an extern "C" prototype.
 extern "C" {
@@ -130,10 +138,7 @@ public:
         HANDLE hProcess = nullptr;
         HANDLE parentPid = nullptr;
 
-        status = ObOpenObjectByPointer(
-            process, OBJ_KERNEL_HANDLE, nullptr,
-            PROCESS_QUERY_LIMITED_INFORMATION, *PsProcessType,
-            KernelMode, &hProcess);
+        status = ObOpenObjectByPointer(process, OBJ_KERNEL_HANDLE, nullptr, PROCESS_QUERY_LIMITED_INFORMATION, *PsProcessType, KernelMode, &hProcess);
 
         if (NT_SUCCESS(status))
         {
@@ -155,6 +160,7 @@ public:
         SeLocateProcessImageName(process, &imagePath);
 
         // Insert into cache (creator == parent for retroactively discovered processes)
+#pragma warning(suppress: 6387)
         NTSTATUS addStatus = AddProcess(processId, parentPid, parentPid, imagePath);
 
         if (imagePath)
@@ -231,4 +237,4 @@ private:
 
         return nullptr;
     }
-};
+};
