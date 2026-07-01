@@ -15,7 +15,7 @@ NTSTATUS AsyncEventDispatcher::Initialize(PFLT_FILTER filter)
 
     m_filter = filter;
     KeInitializeSpinLock(&m_portLock);
-    KeInitializeEvent(&m_dataReady, NotificationEvent, FALSE);
+    KeInitializeEvent(&m_dataReady, SynchronizationEvent, FALSE);
     KeInitializeEvent(&m_stopEvent, NotificationEvent, FALSE);
 
     LARGE_INTEGER freqHz = {};
@@ -202,6 +202,7 @@ NTSTATUS AsyncEventDispatcher::ProduceSlot(const UINT8* bytes, UINT32 size)
                     pad->reserved = 0;
                     pad->payloadBytes = spaceToEnd
                         - static_cast<UINT32>(sizeof(SlotHeader));
+                    pad->strideBytes = spaceToEnd;
                     pad->seqNum = 0;
                     pad->claimedTick = 0; // padding slots don't time out
                     KeMemoryBarrier();
@@ -230,6 +231,7 @@ NTSTATUS AsyncEventDispatcher::ProduceSlot(const UINT8* bytes, UINT32 size)
     hdr->flags = 0;
     hdr->reserved = 0;
     hdr->payloadBytes = size;
+    hdr->strideBytes = stride;
     hdr->seqNum = static_cast<UINT32>(InterlockedIncrement(&m_seqCounter));
 
     if (size > 0)
@@ -264,7 +266,7 @@ UINT32 AsyncEventDispatcher::ConsumeOne()
 
         if (state == static_cast<LONG>(SlotState::Committed))
         {
-            // Normal path — slot is ready.
+            // Normal path - slot is ready.
             const UINT32 payload = hdr->payloadBytes;
             const UINT32 stride = Stride(payload);
 
@@ -296,32 +298,37 @@ UINT32 AsyncEventDispatcher::ConsumeOne()
 
                 if (elapsedMs >= ASYNC_CLAIM_TIMEOUT_MS)
                 {
-                    // Producer is dead or stuck — skip this slot.
+                    // Producer is dead or stuck - skip this slot.
                     KdPrint(("[AsyncDisp] poisoned slot at readHead=%ld "
                         "elapsed=%I64u ms\n",
                         m_readHead, elapsedMs));
 
-                    const UINT32 poisonPayload = hdr->payloadBytes;
+                    // Use the stride written at claim-time; fall back to
+                    // minimum aligned skip if it looks corrupt.
+                    const UINT32 storedStride = hdr->strideBytes;
                     const UINT32 poisonStride =
-                        (poisonPayload > 0 && poisonPayload <= ASYNC_SEND_BUFFER_BYTES)
-                        ? Stride(poisonPayload)
-                        : static_cast<UINT32>(sizeof(SlotHeader));
+                        (storedStride >= static_cast<UINT32>(sizeof(SlotHeader)) &&
+                         storedStride <= static_cast<UINT32>(ASYNC_RING_BYTES / 4u))
+                        ? AlignUp(storedStride)
+                        : AlignUp(static_cast<UINT32>(sizeof(SlotHeader)));
 
-
-                    RtlZeroMemory(hdr, poisonStride);
+                    RtlZeroMemory(hdr, min(poisonStride,
+                        static_cast<UINT32>(ASYNC_RING_BYTES) -
+                        (static_cast<UINT32>(m_readHead) & RingMask())));
                     InterlockedExchange(&hdr->state,
                         static_cast<LONG>(SlotState::Free));
                     m_readHead += static_cast<LONG>(poisonStride);
 
                     InterlockedAdd64(&m_poisoned, 1);
-                    continue; 
+                    continue;
                 }
             }
             return 0;
         }
 
+        // Unexpected Free slot - advance by minimum aligned amount.
         KdPrint(("[AsyncDisp] unexpected Free slot at readHead=%ld\n", m_readHead));
-        m_readHead += static_cast<LONG>(sizeof(SlotHeader));
+        m_readHead += static_cast<LONG>(AlignUp(static_cast<UINT32>(sizeof(SlotHeader))));
         return 0;
     }
 }
@@ -361,16 +368,15 @@ NTSTATUS AsyncEventDispatcher::SendOne(UINT32 bytes)
 
     if (status == STATUS_TIMEOUT)
     {
-
         KIRQL irql2;
         KeAcquireSpinLock(&m_portLock, &irql2);
         m_sendTimeouts++;
-        const bool tooMany = (m_sendTimeouts >= ASYNC_MAX_SEND_TIMEOUTS);
-        if (tooMany)
+        if (m_sendTimeouts >= ASYNC_MAX_SEND_TIMEOUTS)
         {
-            KdPrint(("[AsyncDisp] %lu consecutive timeouts — marking port "
-                "unhealthy\n", m_sendTimeouts));
-            m_clientPort = nullptr;
+            KdPrint(("[AsyncDisp] %lu consecutive timeouts - userspace may be "
+                "slow, dropping event\n", m_sendTimeouts));
+            // Don't null the port - userspace may recover.  Just reset
+            // the counter so we retry sending future events normally.
             m_sendTimeouts = 0;
         }
         KeReleaseSpinLock(&m_portLock, irql2);
@@ -379,6 +385,7 @@ NTSTATUS AsyncEventDispatcher::SendOne(UINT32 bytes)
     return status;
 }
 
+_Use_decl_annotations_
 VOID AsyncEventDispatcher::WorkerEntry(PVOID ctx)
 {
     static_cast<AsyncEventDispatcher*>(ctx)->WorkerLoop();
@@ -407,10 +414,14 @@ void AsyncEventDispatcher::WorkerLoop()
         if (ws == STATUS_WAIT_0)
             stopping = true;
 
-        KeClearEvent(&m_dataReady);
+        // m_dataReady is a SynchronizationEvent (auto-reset).
+        // KeWait atomically clears it - no manual KeClearEvent needed.
 
         for (;;)
         {
+            const UINT32 bytes = ConsumeOne();
+            if (bytes == 0)
+                break;
 
             KIRQL irql;
             KeAcquireSpinLock(&m_portLock, &irql);
@@ -418,17 +429,26 @@ void AsyncEventDispatcher::WorkerLoop()
             KeReleaseSpinLock(&m_portLock, irql);
 
             if (!hasPort)
-                break;
-
-            const UINT32 bytes = ConsumeOne();
-            if (bytes == 0)
-                break;
+            {
+                // No client connected - drain the slot to prevent the ring
+                // from filling up, but count the event as dropped.
+                InterlockedAdd64(&m_dropped, 1);
+                continue;
+            }
 
             const NTSTATUS s = SendOne(bytes);
             if (NT_SUCCESS(s))
                 continue;
 
-            KdPrint(("[AsyncDisp] SendOne %08X — stopping drain cycle\n", s));
+            if (s == STATUS_TIMEOUT)
+            {
+                // Userspace was slow but may recover; drop this one event
+                // and keep draining.
+                InterlockedAdd64(&m_dropped, 1);
+                continue;
+            }
+
+            KdPrint(("[AsyncDisp] SendOne %08X - stopping drain cycle\n", s));
             break;
         }
 

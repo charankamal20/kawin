@@ -15,23 +15,23 @@ namespace kubearmor::comm {
         data::Event event;
         event.event_id = 1;
         event.timestamp = std::chrono::system_clock::time_point(
-            std::chrono::microseconds(kernel_msg->timestamp / 10));
-        event.blocked = kernel_msg->blocked;
+            std::chrono::microseconds(kernel_msg->payload.timestamp / 10));
+        event.blocked = kernel_msg->payload.blocked;
 
         LOG_DEBUG("parsing event operation data");
 
-        switch (kernel_msg->event_operation) {
+        switch (kernel_msg->payload.event_operation) {
         case KernelEventOperation::FILE_EVENT:
             event.operation_type = data::EventOperationType::FILE_EVENT;
             event.data = ParseFileEvent(kernel_msg, buffer_size);
             break;
         case KernelEventOperation::PROCESS_EVENT:
             event.operation_type = data::EventOperationType::PROCESS_EVENT;
-            //event.data = ParseProcessEvent(kernel_msg, buffer_size);
+            event.data = ParseProcessEvent(kernel_msg, buffer_size);
             break;
         case KernelEventOperation::NETWORK_EVENT:
             event.operation_type = data::EventOperationType::NETWORK_EVENT;
-            //event.data = ParseNetworkEvent(kernel_msg, buffer_size);
+            event.data = ParseNetworkEvent(kernel_msg, buffer_size);
             break;
         default:
             return common::Result<data::Event>::Error("Unknown event type");
@@ -41,7 +41,7 @@ namespace kubearmor::comm {
     }
 
     data::FileEventData MessageParser::ParseFileEvent(const KernelMessage* km, size_t buffer_size) {
-        const auto& file_data = km->data.file;
+        const auto& file_data = km->payload.data.file;
 
         data::FileEventData fd;
 
@@ -85,15 +85,46 @@ namespace kubearmor::comm {
 
     data::ProcessEventData MessageParser::ParseProcessEvent(const KernelMessage* km, size_t buffer_size) {
         LOG_DEBUG("parsing process event operation data");
-        const auto& process_data = km->data.process;
+        const auto& process_data = km->payload.data.process;
 
         data::ProcessEventData pd;
 
         pd.operation = static_cast<data::ProcessOperation>(process_data.operation);
         pd.process_id = process_data.process_id;
+        pd.parent_process_id = process_data.parent_process_id;
 
-        // TODO 
-        // parse process data
+        if (process_data.process_path_length > 0) {
+            const wchar_t* process_path = km->get_string_at_offset(
+                process_data.process_path_offset,
+                buffer_size
+            );
+            if (process_path){
+                size_t char_count = process_data.process_path_length / sizeof(wchar_t);
+                pd.process_path = WStringToString(process_path, char_count);
+            }
+        }
+        
+        if (process_data.command_line_length > 0) {
+            const wchar_t* cmdline = km->get_string_at_offset(
+                process_data.command_line_offset,
+                buffer_size
+            );
+            if (cmdline){
+                size_t char_count = process_data.command_line_length / sizeof(wchar_t);
+                pd.command_line = WStringToString(cmdline, char_count);
+            }
+        }
+        
+        if (process_data.parent_process_path_length > 0) {
+            const wchar_t* parent_path = km->get_string_at_offset(
+                process_data.parent_process_path_offset,
+                buffer_size
+            );
+            if (parent_path){
+                size_t char_count = process_data.parent_process_path_length / sizeof(wchar_t);
+                pd.parent_process_path = WStringToString(parent_path, char_count);
+            }
+        }
 
         LOG_DEBUG("returned process event operation data");
         return pd;
@@ -101,7 +132,7 @@ namespace kubearmor::comm {
 
     data::NetworkEventData MessageParser::ParseNetworkEvent(const KernelMessage* km, size_t buffer_size) {
         LOG_DEBUG("parsing network operation data");
-        const auto& network_data = km->data.network;
+        const auto& network_data = km->payload.data.network;
 
         data::NetworkEventData nd;
         nd.operation = static_cast<data::NetworkOperation>(network_data.operation);

@@ -17,7 +17,7 @@ namespace kubearmor::comm {
         NETWORK_EVENT = 3
     };
 
-#pragma pack(push, 8)
+#pragma pack(push, 1)
 
     struct KernelFileEvent {
         uint32_t operation;
@@ -51,26 +51,29 @@ namespace kubearmor::comm {
         uint8_t address_family;
     };
 
-    struct KernelMessage {
-        FILTER_MESSAGE_HEADER header;
-
+    struct KernelEventPayload {
         uint64_t timestamp;
         KernelEventType event_type;
         KernelEventOperation event_operation;
-        bool blocked;
+        uint8_t blocked;
         union {
             KernelFileEvent file;
             KernelProcessEvent process;
             KernelNetworkEvent network;
         } data;
+    };
 
+#pragma pack(pop)
+
+    struct KernelMessage {
+        FILTER_MESSAGE_HEADER header;
+        KernelEventPayload payload;
 
         const wchar_t* get_string_at_offset(size_t offset, size_t buffer_size) const {
             const uint8_t* buffer_start = reinterpret_cast<const uint8_t*>(this);
-            // this should be offset by kernel header, as kenel event struct doesn't have
-            // header defined and offsets are calculated relative to event
-            const uint8_t* string_area_start = buffer_start + sizeof(FILTER_MESSAGE_HEADER);
-            const uint8_t* target = string_area_start + offset;
+            // Payload follows header, but the offset is calculated from the start of the EVENT struct (payload).
+            const uint8_t* payload_start = reinterpret_cast<const uint8_t*>(&this->payload);
+            const uint8_t* target = payload_start + offset;
 
             if (target >= buffer_start + buffer_size) {
                 return nullptr;
@@ -79,8 +82,6 @@ namespace kubearmor::comm {
             return reinterpret_cast<const wchar_t*>(target);
         }
     };
-
-#pragma pack(pop)
 
     // compile-time size checks 
     // we need this to match the user and kernel structs for compatibility

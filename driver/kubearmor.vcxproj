@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -131,6 +131,7 @@
     <ClInclude Include="ETW.h" />
     <ClInclude Include="FastMutex.h" />
     <ClInclude Include="Filter.h" />
+    <ClInclude Include="EventStructs.h" />
     <ClInclude Include="Globals.h" />
     <ClInclude Include="HashTable.h" />
     <ClInclude Include="KarmorLogs.h" />

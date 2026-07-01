@@ -5,6 +5,7 @@
 #include "Protocol.h"
 #include "Context.h"
 #include "ProcessNode.h"
+#include "EventStructs.h"
 
 class FileEventSerializer {
 public:
@@ -15,58 +16,55 @@ public:
         _In_ StreamHandleContext* ptrStrHandleCtx,
         _In_ InstanceContext* pInstCtx)
     {
-        Serializer serializer(buffer);
+        UNREFERENCED_PARAMETER(pInstCtx);
+
+        if (!buffer.IsValid()) {
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
 
         LARGE_INTEGER timestamp;
         KeQuerySystemTime(&timestamp);
 
-        // write event type
-        if (!serializer.WriteFieldULong(FIELD_EVENT_TYPE, static_cast<ULONG>(eventType))) {
-            return STATUS_INSUFFICIENT_RESOURCES;
+        EVENT ev = { 0 };
+        ev.timestamp = timestamp.QuadPart;
+        ev.type = EventType_HostLog;
+        ev.operation = EventOperation_File;
+        ev.blocked = FALSE;
+
+        FILE_EVENT fe = { 0 };
+        switch (eventType) {
+            case protocol::EVENT_TYPE_FILE_CREATE: fe.Operation = 0; break;
+            case protocol::EVENT_TYPE_FILE_READ: fe.Operation = 1; break;
+            case protocol::EVENT_TYPE_FILE_WRITE: fe.Operation = 2; break;
+            case protocol::EVENT_TYPE_FILE_DELETE: fe.Operation = 3; break;
+            case protocol::EVENT_TYPE_FILE_RENAME: fe.Operation = 4; break;
+            case protocol::EVENT_TYPE_FILE_SET_INFO: fe.Operation = 5; break;
+            case protocol::EVENT_TYPE_FILE_CLOSE: fe.Operation = 7; break;
+            default: fe.Operation = 0;
+        }
+        fe.ProcessId = HandleToULong(ptrStrHandleCtx->processId);
+
+        if (!buffer.WriteBytes(&ev, sizeof(EVENT))) {
+            return STATUS_BUFFER_TOO_SMALL;
         }
 
-        // write timestamp
-        if (!serializer.WriteFieldULongLong(FIELD_TIMESTAMP, timestamp.QuadPart)) {
-            return STATUS_INSUFFICIENT_RESOURCES;
+        if (ptrStrHandleCtx->processPath.Length > 0 && ptrStrHandleCtx->processPath.Buffer != nullptr) {
+            fe.ProcessPathOffset = buffer.GetCurrentSize();
+            fe.ProcessPathLength = ptrStrHandleCtx->processPath.Length;
+            buffer.WriteBytes(ptrStrHandleCtx->processPath.Buffer, ptrStrHandleCtx->processPath.Length);
         }
 
-        // write process id
-        if (!serializer.WriteFieldULong(FIELD_PROCESS_ID, HandleToULong(ptrStrHandleCtx->processId))) {
-            return STATUS_INSUFFICIENT_RESOURCES;
+        if (ptrStrHandleCtx->filePath.Length > 0 && ptrStrHandleCtx->filePath.Buffer != nullptr) {
+            fe.FilePathOffset = buffer.GetCurrentSize();
+            fe.FilePathLength = ptrStrHandleCtx->filePath.Length;
+            buffer.WriteBytes(ptrStrHandleCtx->filePath.Buffer, ptrStrHandleCtx->filePath.Length);
         }
 
-        // write process path
-        if (ptrStrHandleCtx->processPath.Length) {
-            //DbgPrint("processPath has non zero length: %wZ\n", ptrStrHandleCtx->processPath);
-        }
-        else {
-            //DbgPrint("processPath has zero length");
-        }
-        if (ptrStrHandleCtx->processPath.Length && !serializer.WriteFieldUnicodeString(FIELD_IMAGE_PATH, &ptrStrHandleCtx->processPath)) {
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
+        ev.data.File = fe;
 
-        // write file path
-        if (!serializer.WriteFieldUnicodeString(FIELD_FILE_PATH, &ptrStrHandleCtx->filePath)) {
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
-
-        // write file volume details
-
-        // write volume guid
-        if (!serializer.WriteFieldBinary(FIELD_VOLUME_GUID, (PVOID)&pInstCtx->volumeGuid, sizeof(GUID))) {
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
-
-        // write volume type
-        if (!serializer.WriteFieldULong(FIELD_VOLUME_TYPE, static_cast<ULONG>(pInstCtx->volumeType))) {
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
-
-        if (pInstCtx->isUsbDevice && pInstCtx->volumeName.Length != 0) {
-            if (!serializer.WriteFieldUnicodeString(FIELD_VOLUME_NAME, &pInstCtx->volumeName)) {
-                return STATUS_INSUFFICIENT_RESOURCES;
-            }
+        // Guard: only write back the header if the buffer is still valid
+        if (buffer.GetBuffer() != nullptr && !buffer.HasOverflow()) {
+            RtlCopyMemory(buffer.GetBuffer(), &ev, sizeof(EVENT));
         }
 
         if (buffer.HasOverflow()) {
